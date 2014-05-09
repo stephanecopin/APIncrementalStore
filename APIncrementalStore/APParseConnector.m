@@ -723,7 +723,8 @@ static NSUInteger const APParseQueryFetchLimit = 100;
             if (AP_DEBUG_INFO) { DLog(@"Parse object saved: %@",parseObject)}
             
             /* Parse sets the objectId and updatedAt for a new object only after we save it. */
-            [managedObject setValue:parseObject.updatedAt forKey:APObjectLastModifiedAttributeName];
+            NSDate * date = [parseObject.updatedAt isKindOfClass:[NSNull class]] ? [NSDate date] : parseObject.updatedAt;
+            [managedObject setValue:date forKey:APObjectLastModifiedAttributeName];
             [managedObject setValue:@YES forKey:APObjectIsCreatedRemotelyAttributeName];
             
         } else {
