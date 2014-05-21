@@ -19,7 +19,7 @@
 
 #import "NSArray+Enumerable.h"
 #import "NSLogEmoji.h"
-#import "Common.h"
+#import "APCommon.h"
 #import "APError.h"
 
 // If a NSEnitityDescription has this key set to NO on its userInfo propriety then it will be included
@@ -77,6 +77,8 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
             _shouldResetCacheFile = shouldResetCache;
             _connector = connector;
             self.model = model;
+            
+            if (AP_DEBUG_INFO) {DLog(@"Disk cache using local store name: %@",localStoreFileName)}
             
         } else {
             if (AP_DEBUG_ERRORS) { ELog(@"Can't init")}
@@ -203,10 +205,13 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
     NSURL *storeURL = [NSURL fileURLWithPath:[self pathToLocalStore]];
     
     if (self.shouldResetCacheFile) {
+        
         if ([[NSFileManager defaultManager] fileExistsAtPath:[storeURL path] isDirectory:nil]){
-            NSError* deleteError;
+            NSError* deleteError = nil;
+            
             if (![[NSFileManager defaultManager] removeItemAtURL:storeURL error:&deleteError]){
                 if (AP_DEBUG_ERRORS) { ELog(@"Error deleting cachefile:%@",deleteError)}
+           
             } else {
                 if (AP_DEBUG_INFO) { DLog(@"Cache file deleted")};
             }
@@ -247,15 +252,15 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
     
     [self.syncContext performBlock:^ {
         
-        __block NSError* error;
+        __block NSError* error = nil;
         __block NSMutableDictionary* mutableObjectUIDsNestedByEntityName = [NSMutableDictionary dictionary];
         
-        void(^failureBlock)(void) = ^{
+        void (^failureBlock)(void) = ^{
             [[UIApplication sharedApplication] setNetworkActivityIndicatorVisible:NO];
             if (conpletionBlock) conpletionBlock(nil,error);
         };
         
-        void(^successBlock)(void) = ^{
+        void (^successBlock)(void) = ^{
             [[UIApplication sharedApplication] setNetworkActivityIndicatorVisible:NO];
             if (conpletionBlock) conpletionBlock(mutableObjectUIDsNestedByEntityName,error);
         };
@@ -304,15 +309,15 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
         
         // Save all contexts
         
-        NSError* savingError;
+        NSError* savingError = nil;
         if (![self saveSyncContext:&savingError]) {
             [self.connector syncProcessDidFinish:NO];
             [[NSOperationQueue mainQueue]addOperationWithBlock:failureBlock];
+            
         } else {
             [self.connector syncProcessDidFinish:YES];
             [[NSOperationQueue mainQueue]addOperationWithBlock:successBlock];
         }
-        
         self.syncContext = nil;
     }];
 }
@@ -408,17 +413,27 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
                 
                 NSManagedObject* relatedObject = [cacheObject primitiveValueForKey:propertyName];
                 [relatedObject willAccessValueForKey:propertyName];
-                representation[propertyName] = [relatedObject valueForKey:APObjectUIDAttributeName] ?: [NSNull null];
+                
+                if ([relatedObject valueForKey:APObjectUIDAttributeName]) {
+                    representation[propertyName] = @{relatedObject.entity.name:[relatedObject valueForKey:APObjectUIDAttributeName]};
+                    
+                } else {
+                    representation[propertyName] =  [NSNull null];
+                }
                 [relatedObject didAccessValueForKey:propertyName];
+                
             } else {
                 
                 // To-Many
                 
                 NSSet* relatedObjects = [cacheObject primitiveValueForKey:propertyName];
-                __block NSMutableArray* relatedObjectsRepresentation = [[NSMutableArray alloc] initWithCapacity:[relatedObjects count]];
+                __block NSMutableDictionary* relatedObjectsRepresentation = [[NSMutableDictionary alloc] initWithCapacity:[relatedObjects count]];
+                
                 [relatedObjects enumerateObjectsUsingBlock:^(NSManagedObject* relatedObject, BOOL *stop) {
                     [relatedObject willAccessValueForKey:propertyName];
-                    [relatedObjectsRepresentation addObject:[relatedObject valueForKey:APObjectUIDAttributeName]];
+                        NSMutableArray* relatedObjectsUID = [[relatedObjectsRepresentation valueForKey:relatedObject.entity.name]mutableCopy] ?: [NSMutableArray arrayWithCapacity:1];
+                        [relatedObjectsUID addObject:[relatedObject valueForKey:APObjectUIDAttributeName]];
+                        [relatedObjectsRepresentation setValue:relatedObjectsUID forKey:relatedObject.entity.name];
                     [relatedObject didAccessValueForKey:propertyName];
                 }];
                 representation[propertyName] = relatedObjectsRepresentation ?: [NSNull null];
@@ -450,9 +465,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
     
     if (AP_DEBUG_METHODS) { MLog()}
     
-    if (!predicate) {
-        return nil;
-    }
+    if (!predicate)return nil;
     
     NSPredicate *predicateToReturn = [predicate copy];
     
@@ -468,33 +481,46 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
         
     } else {
         NSComparisonPredicate *comparisonPredicate = (NSComparisonPredicate *)predicate;
-        NSManagedObjectID *objectID = nil;
+        NSManagedObjectID *objectID;
+        NSManagedObjectID *cacheObjectID;
+        NSExpression *rightExpression = comparisonPredicate.rightExpression;
+        NSExpression *leftExpression = comparisonPredicate.leftExpression;
         
-        if ([comparisonPredicate.rightExpression.constantValue isKindOfClass:[NSManagedObject class]]) {
-            objectID = [(NSManagedObject *)comparisonPredicate.rightExpression.constantValue objectID];
-            NSString *referenceObject = self.translateManagedObjectIDToObjectUIDBlock(objectID);
-            NSManagedObjectID *cacheObjectID = [self fetchManagedObjectIDForObjectUID:referenceObject entityName:[[objectID entity] name] createIfNeeded:NO];
+        if (comparisonPredicate.leftExpression.expressionType == NSConstantValueExpressionType) {
             
-            NSExpression *rightExpression = [NSExpression expressionForConstantValue:cacheObjectID];
-            predicateToReturn = [NSComparisonPredicate predicateWithLeftExpression:comparisonPredicate.leftExpression rightExpression:rightExpression modifier:comparisonPredicate.comparisonPredicateModifier type:comparisonPredicate.predicateOperatorType options:comparisonPredicate.options];
-            
-        } else if ([comparisonPredicate.rightExpression.constantValue isKindOfClass:[NSManagedObjectID class]]) {
-            objectID = (NSManagedObjectID *)comparisonPredicate.rightExpression.constantValue;
-            NSString *referenceObject = self.translateManagedObjectIDToObjectUIDBlock(objectID);
-            NSManagedObjectID *cacheObjectID = [self fetchManagedObjectIDForObjectUID:referenceObject entityName:[[objectID entity] name] createIfNeeded:NO];
-            
-            NSExpression *rightExpression = [NSExpression expressionForConstantValue:cacheObjectID];
-            predicateToReturn = [NSComparisonPredicate predicateWithLeftExpression:comparisonPredicate.leftExpression rightExpression:rightExpression modifier:comparisonPredicate.comparisonPredicateModifier type:comparisonPredicate.predicateOperatorType options:comparisonPredicate.options];
-            
-        } else if ([comparisonPredicate.rightExpression.constantValue isKindOfClass:[NSString class]]) {
-            
-            //            if ([comparisonPredicate.rightExpression.constantValue hasPrefix:APObjectNewUIDPrefix]) {
-            //                NSString* tempObjectID = comparisonPredicate.rightExpression.constantValue;
-            //                NSString *referenceObject = [[self.remoteDBConnector mapOfTemporaryToPermanentUID]valueForKey:tempObjectID];
-            //                NSExpression *rightExpression = [NSExpression expressionForConstantValue:referenceObject];
-            //                predicateToReturn = [NSComparisonPredicate predicateWithLeftExpression:comparisonPredicate.leftExpression rightExpression:rightExpression modifier:comparisonPredicate.comparisonPredicateModifier type:comparisonPredicate.predicateOperatorType options:comparisonPredicate.options];
-            //            }
+            if ([comparisonPredicate.leftExpression.constantValue isKindOfClass:[NSManagedObject class]]) {
+                objectID = [(NSManagedObject *)comparisonPredicate.leftExpression.constantValue objectID];
+                NSString *referenceObject = self.translateManagedObjectIDToObjectUIDBlock(objectID);
+                cacheObjectID = [self fetchManagedObjectIDForObjectUID:referenceObject entityName:[[objectID entity] name] createIfNeeded:NO];
+                
+            } else if ([comparisonPredicate.leftExpression.constantValue isKindOfClass:[NSManagedObjectID class]]) {
+                objectID = (NSManagedObjectID *)comparisonPredicate.leftExpression.constantValue;
+                NSString *referenceObject = self.translateManagedObjectIDToObjectUIDBlock(objectID);
+                cacheObjectID = [self fetchManagedObjectIDForObjectUID:referenceObject entityName:[[objectID entity] name] createIfNeeded:NO];
+            }
+            if (cacheObjectID) leftExpression = [NSExpression expressionForConstantValue:cacheObjectID];
         }
+        
+        if (comparisonPredicate.rightExpression.expressionType == NSConstantValueExpressionType) {
+            
+            if ([comparisonPredicate.rightExpression.constantValue isKindOfClass:[NSManagedObject class]]) {
+                objectID = [(NSManagedObject *)comparisonPredicate.rightExpression.constantValue objectID];
+                NSString *referenceObject = self.translateManagedObjectIDToObjectUIDBlock(objectID);
+                cacheObjectID = [self fetchManagedObjectIDForObjectUID:referenceObject entityName:[[objectID entity] name] createIfNeeded:NO];
+                
+            } else if ([comparisonPredicate.rightExpression.constantValue isKindOfClass:[NSManagedObjectID class]]) {
+                objectID = (NSManagedObjectID *)comparisonPredicate.rightExpression.constantValue;
+                NSString *referenceObject = self.translateManagedObjectIDToObjectUIDBlock(objectID);
+                cacheObjectID = [self fetchManagedObjectIDForObjectUID:referenceObject entityName:[[objectID entity] name] createIfNeeded:NO];
+            }
+            if (cacheObjectID) rightExpression = [NSExpression expressionForConstantValue:cacheObjectID];
+        }
+        
+        predicateToReturn = [NSComparisonPredicate predicateWithLeftExpression:leftExpression
+                                                               rightExpression:rightExpression
+                                                                      modifier:comparisonPredicate.comparisonPredicateModifier
+                                                                          type:comparisonPredicate.predicateOperatorType
+                                                                       options:comparisonPredicate.options];
     }
     
     // see -[APDiskCache setModel:] for a comprensive explanation
@@ -571,7 +597,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
             cacheObject = [NSEntityDescription insertNewObjectForEntityForName:entityName inManagedObjectContext:self.mainContext];
             [cacheObject setValue:objectUID forKey:APObjectUIDAttributeName];
             
-            NSError* permanentIdError;
+            NSError* permanentIdError = nil;
             [self.mainContext obtainPermanentIDsForObjects:@[cacheObject] error:&permanentIdError];
             // Sanity check
             if (permanentIdError) {
@@ -618,7 +644,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
         } else {
             managedObject = [NSEntityDescription insertNewObjectForEntityForName:entityName inManagedObjectContext:self.mainContext];
             
-            NSError* permanentIdError;
+            NSError* permanentIdError = nil;
             [self.mainContext obtainPermanentIDsForObjects:@[managedObject] error:&permanentIdError];
             // Sanity check
             if (permanentIdError) {
@@ -632,7 +658,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
         [managedObject setValue:@NO forKey:APObjectIsDeletedAttributeName];
     }];
     
-    NSError* saveError;
+    NSError* saveError = nil;
     if (![self saveMainContext:&saveError]) {
         success = NO;
         *error = saveError;
@@ -659,7 +685,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
         [managedObject setValue:@YES forKey:APObjectIsDirtyAttributeName];
     }];
     
-    NSError* saveError;
+    NSError* saveError = nil;
     if (![self saveMainContext:&saveError]) {
         success = NO;
         *error = saveError;
@@ -712,36 +738,43 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
             if (representation[propertyName] == [NSNull null]) {
                 [managedObject setPrimitiveValue:nil forKey:propertyName];
             } else {
-                if ([propertyName isEqualToString:APObjectUIDAttributeName]) {
+//                if ([propertyName isEqualToString:APObjectUIDAttributeName]) {
+//                    [managedObject setPrimitiveValue:representation[propertyName] forKey:propertyName];
+//                } else {
                     [managedObject setPrimitiveValue:representation[propertyName] forKey:propertyName];
-                } else {
-                    [managedObject setPrimitiveValue:representation[propertyName] forKey:propertyName];
-                }
+             //   }
             }
             
             // Relationships faulted in
         } else if (![managedObject hasFaultForRelationshipNamed:propertyName]) {
             NSRelationshipDescription *relationshipDescription = (NSRelationshipDescription *)propertyDescription;
             
-            //To-many
             if ([relationshipDescription isToMany]) {
                 NSMutableSet *relatedObjects = [[managedObject primitiveValueForKey:propertyName] mutableCopy];
                 if (relatedObjects != nil) {
                     [relatedObjects removeAllObjects];
-                    NSArray *relatedRepresentations = representation[propertyName];
-                    [relatedRepresentations enumerateObjectsUsingBlock:^(NSString* objectUID, NSUInteger idx, BOOL *stop) {
-                        NSManagedObjectID* relatedManagedObjectID = [self fetchManagedObjectIDForObjectUID:objectUID entityName:relationshipDescription.destinationEntity.name createIfNeeded:YES];
-                        [relatedObjects addObject:[self.mainContext objectWithID:relatedManagedObjectID]];
+                    NSDictionary *relatedRepresentations = representation[propertyName];
+                    
+                    [relatedRepresentations enumerateKeysAndObjectsUsingBlock:^(NSString* entityName, NSArray* relatedObjectUIDs, BOOL *stop) {
+                        
+                        [relatedObjectUIDs enumerateObjectsUsingBlock:^(NSString* objectUID, NSUInteger idx, BOOL *stop) {
+                            NSManagedObjectID* relatedManagedObjectID = [self fetchManagedObjectIDForObjectUID:objectUID entityName:entityName createIfNeeded:YES];
+                            [relatedObjects addObject:[self.mainContext objectWithID:relatedManagedObjectID]];
+                        }];
                     }];
                     [managedObject setPrimitiveValue:relatedObjects forKey:propertyName];
                 }
                 
-                //To-one
             } else {
+                
+                //To-one
+                
                 if (representation[propertyName] == [NSNull null]) {
                     [managedObject setValue:nil forKey:propertyName];
                 } else {
-                    NSManagedObjectID* relatedManagedObjectID = [self fetchManagedObjectIDForObjectUID:representation[propertyName] entityName:relationshipDescription.destinationEntity.name createIfNeeded:YES];
+                    NSString* relatedEntityName = [[representation[propertyName]allKeys]lastObject];
+                    NSString* relatedEntityObjectUID = [[representation[propertyName]allValues]lastObject];
+                    NSManagedObjectID* relatedManagedObjectID = [self fetchManagedObjectIDForObjectUID:relatedEntityObjectUID entityName:relatedEntityName createIfNeeded:YES];
                     NSManagedObject *relatedObject = [[managedObject managedObjectContext] objectWithID:relatedManagedObjectID];
                     [managedObject setPrimitiveValue:relatedObject forKey:propertyName];
                 }

@@ -22,7 +22,7 @@
 #import "APParseConnector.h"
 
 #import "NSArray+Enumerable.h"
-#import "Common.h"
+#import "APCommon.h"
 #import "APError.h"
 #import "NSLogEmoji.h"
 
@@ -30,8 +30,8 @@
 #pragma mark - Notifications
 
 /********************
- / Sync Notifications
- ********************/
+/ Sync Notifications
+********************/
 
 NSString* const APNotificationRequestCacheSync = @"com.apetis.apincrementalstore.diskcache.request.sync";
 NSString* const APNotificationRequestCacheFullSync = @"com.apetis.apincrementalstore.diskcache.request.fullsync";
@@ -45,8 +45,8 @@ NSString* const APNotificationCacheNumberOfRemoteObjectsKey = @"com.apetis.apinc
 
 
 /**************************
- / Cache Reset Notifications
- ***************************/
+/ Cache Reset Notifications
+***************************/
 
 NSString* const APNotificationCacheRequestReset = @"com.apetis.apincrementalstore.diskcache.request.reset";
 NSString* const APNotificationCacheDidFinishReset = @"com.apetis.apincrementalstore.diskcache.didfinishreset";
@@ -86,29 +86,29 @@ static NSString* const APReferenceCountKey = @"APReferenceCountKey";
  See: managedObjectContextDidUnregisterObjectsWithIDs: and managedObjectContextDidRegisterObjectsWithIDs:
  
  Structure is as follows:
- 
+
  {
- Entity1: {
- objectUID: {
- kAPNSManagedObjectIDKey: objectID,
- kAPReferenceCountKey: referenceCount
- },
- {
- objectUUID: {kAPNSManagedObjectIDKey: objectID,
- kAPReferenceCountKey: referenceCount
- },
- ...
- },
- Entity2: {
- objectUID: {
- kAPNSManagedObjectIDKey: objectID,
- kAPReferenceCountKey: referenceCount
- },
- objectUID: {
- kAPNSManagedObjectIDKey: objectID,
- kAPReferenceCountKey: referenceCount},
- },
- ...
+    Entity1: {
+                objectUID: {
+                                kAPNSManagedObjectIDKey: objectID,
+                                kAPReferenceCountKey: referenceCount
+                            },
+                            {   
+                                objectUUID: {kAPNSManagedObjectIDKey: objectID,
+                                kAPReferenceCountKey: referenceCount
+                            },
+                            ...
+            },
+    Entity2: {
+                objectUID: {
+                                kAPNSManagedObjectIDKey: objectID,
+                                kAPReferenceCountKey: referenceCount
+                            },
+                objectUID: {
+                                kAPNSManagedObjectIDKey: objectID,
+                                kAPReferenceCountKey: referenceCount},
+            },
+    ...
  }
  */
 @property (nonatomic, strong) NSMutableDictionary *mapBetweenManagedObjectIDsAndObjectUIDByEntityName;
@@ -125,114 +125,120 @@ static NSString* const APReferenceCountKey = @"APReferenceCountKey";
                        configurationName:(NSString *)name
                                      URL:(NSURL *)url
                                  options:(NSDictionary *)options {
-  
-  if (AP_DEBUG_METHODS) { MLog() }
-  
-  self = [super initWithPersistentStoreCoordinator:psc configurationName:name URL:url options:options];
-  
-  if (self) {
     
-    id authenticatedUser = [options valueForKey:APOptionAuthenticatedUserObjectKey];
-    if (!authenticatedUser) {
-      if (AP_DEBUG_ERRORS) {ELog(@"Authenticated user is not set")}
-      return nil;
+    if (AP_DEBUG_METHODS) { MLog() }
+    
+    self = [super initWithPersistentStoreCoordinator:psc configurationName:name URL:url options:options];
+    
+    if (self) {
+        
+        id authenticatedUser = [options valueForKey:APOptionAuthenticatedUserObjectKey];
+        if (!authenticatedUser) {
+            if (AP_DEBUG_ERRORS) {ELog(@"Authenticated user is not set")}
+            return nil;
+        }
+        APMergePolicy mergePolicy = [[options valueForKey:APOptionMergePolicyKey] integerValue];
+        _webServiceConnector = [[APParseConnector alloc]initWithAuthenticatedUser:authenticatedUser mergePolicy:mergePolicy];
+        
+        if (![_webServiceConnector conformsToProtocol:@protocol(APWebServiceConnector)]) {
+            [NSException raise:APIncrementalStoreExceptionInconsistency format:@"Object not complatible with APIncrementalStoreConnector protocol"];
+        }
+        
+        _model = psc.managedObjectModel;
+        
+        // There will be one sqlite store file for each user. The file name will be <username>-<APOptionCacheFileNameKey>
+        // ie: flavio-apincrementalstorediskcache.sqlite
+        NSString* diskCacheFileNameSuffix = [@"-" stringByAppendingString:[options valueForKey:APOptionCacheFileNameKey] ?: APDefaultLocalCacheFileName];
+        _diskCacheFileName = [[self.webServiceConnector authenticatedUserID]stringByAppendingString: diskCacheFileNameSuffix];
+        _shouldResetCacheFile = [options[APOptionCacheFileResetKey] boolValue];
+        
+        [self registerForNotifications];
     }
-    APMergePolicy mergePolicy = [[options valueForKey:APOptionMergePolicyKey] integerValue];
-    _webServiceConnector = [[APParseConnector alloc]initWithAuthenticatedUser:authenticatedUser mergePolicy:mergePolicy];
-    if (![_webServiceConnector conformsToProtocol:@protocol(APWebServiceConnector)]) {
-      [NSException raise:APIncrementalStoreExceptionInconsistency format:@"Object not complatible with APIncrementalStoreConnector protocol"];
-    }
-    
-    _model = psc.managedObjectModel;
-    
-    // There will be one sqlite store file for each user. The file name will be <username>-<APOptionCacheFileNameKey>
-    // ie: flavio-apincrementalstorediskcache.sqlite
-    NSString* diskCacheFileNameSuffix = [@"-" stringByAppendingString:[options valueForKey:APOptionCacheFileNameKey] ?: APDefaultLocalCacheFileName];
-    _diskCacheFileName = [[self.webServiceConnector authenticatedUserID]stringByAppendingString: diskCacheFileNameSuffix];
-    _shouldResetCacheFile = [options[APOptionCacheFileResetKey] boolValue];
-    
-    [self registerForNotifications];
-  }
-  return self;
+    return self;
 }
 
 
 - (void)dealloc {
-  
-  if (AP_DEBUG_METHODS) { MLog()}
-  [self unregisterForNotifications];
+    
+    if (AP_DEBUG_METHODS) { MLog()}
+    [self unregisterForNotifications];
 }
 
 
 #pragma mark - Notification Observation
 
 - (void)registerForNotifications {
-  
-  if (AP_DEBUG_METHODS) { MLog()}
-  
-  [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(didReceiveSyncNotifcation:) name:APNotificationRequestCacheSync object:nil];
-  [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(didReceiveFullSyncNotifcation:) name:APNotificationRequestCacheFullSync object:nil];
-  [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(didReceiveResetCacheNotifcation:) name:APNotificationCacheRequestReset object:nil];
+    
+    if (AP_DEBUG_METHODS) { MLog()}
+    
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(didReceiveSyncNotifcation:) name:APNotificationRequestCacheSync object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(didReceiveFullSyncNotifcation:) name:APNotificationRequestCacheFullSync object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(didReceiveResetCacheNotifcation:) name:APNotificationCacheRequestReset object:nil];
 }
 
 
 - (void)unregisterForNotifications {
-  
-  if (AP_DEBUG_METHODS) { MLog()}
-  
-  [[NSNotificationCenter defaultCenter] removeObserver:self name:APNotificationRequestCacheSync object:nil];
-  [[NSNotificationCenter defaultCenter] removeObserver:self name:APNotificationRequestCacheFullSync object:nil];
-  [[NSNotificationCenter defaultCenter] removeObserver:self name:APNotificationCacheRequestReset object:nil];
+    
+    if (AP_DEBUG_METHODS) { MLog()}
+    
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:APNotificationRequestCacheSync object:nil];
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:APNotificationRequestCacheFullSync object:nil];
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:APNotificationCacheRequestReset object:nil];
 }
 
 
 #pragma mark - Getters and Setters
 
 - (APDiskCache*) diskCache {
-  
-  if (AP_DEBUG_METHODS) { MLog()}
-  
-  if (!_diskCache) {
     
-    __weak  typeof(self) weakSelf = self;
-    NSString* (^translateBlock)(NSManagedObjectID*) = ^NSString* (NSManagedObjectID* objectID) {
-      return [weakSelf referenceObjectForObjectID:objectID];
-    };
+    if (AP_DEBUG_METHODS) { MLog()}
     
-    _diskCache = [[APDiskCache alloc]initWithManagedModel:self.model
-                                translateToObjectUIDBlock:translateBlock
-                                       localStoreFileName:self.diskCacheFileName
-                                     shouldResetCacheFile:self.shouldResetCacheFile
-                                      webServiceConnector:self.webServiceConnector];
-  }
-  return _diskCache;
+    if (!_diskCache) {
+        
+        __weak  typeof(self) weakSelf = self;
+        NSString* (^translateBlock)(NSManagedObjectID*) = ^NSString* (NSManagedObjectID* objectID) {
+            
+            if ([objectID isTemporaryID]) {
+                //[NSException raise:APIncrementalStoreExceptionIncompatibleRequest format:@"Can't fetch based on unsaved managed object id (temporary objectID: %@",objectID];
+                return nil;
+            }
+            return [weakSelf referenceObjectForObjectID:objectID];
+        };
+        
+        _diskCache = [[APDiskCache alloc]initWithManagedModel:self.model
+                                    translateToObjectUIDBlock:translateBlock
+                                           localStoreFileName:self.diskCacheFileName
+                                         shouldResetCacheFile:self.shouldResetCacheFile
+                                          webServiceConnector:self.webServiceConnector];
+    }
+    return _diskCache;
 }
 
 
 - (NSMutableDictionary*) mapBetweenManagedObjectIDsAndObjectUIDByEntityName {
-  
-  if (!_mapBetweenManagedObjectIDsAndObjectUIDByEntityName) {
-    _mapBetweenManagedObjectIDsAndObjectUIDByEntityName = [NSMutableDictionary dictionary];
-  }
-  return _mapBetweenManagedObjectIDsAndObjectUIDByEntityName;
+    
+    if (!_mapBetweenManagedObjectIDsAndObjectUIDByEntityName) {
+        _mapBetweenManagedObjectIDsAndObjectUIDByEntityName = [NSMutableDictionary dictionary];
+    }
+    return _mapBetweenManagedObjectIDsAndObjectUIDByEntityName;
 }
 
 
 #pragma mark - NSIncrementalStore Subclass Methods
 
 - (BOOL)loadMetadata:(NSError *__autoreleasing *)error {
-  
-  if (AP_DEBUG_METHODS) { MLog() }
-  
-  [self setMetadata:@{NSStoreUUIDKey: [[NSProcessInfo processInfo] globallyUniqueString],
-                      NSStoreTypeKey: NSStringFromClass([self class])}];
-  return YES;
+    
+    if (AP_DEBUG_METHODS) { MLog() }
+    
+    [self setMetadata:@{NSStoreUUIDKey: [[NSProcessInfo processInfo] globallyUniqueString],
+                        NSStoreTypeKey: NSStringFromClass([self class])}];
+    return YES;
 }
 
 
 + (NSString*) type {
-  if (AP_DEBUG_METHODS) { MLog()}
-  return NSStringFromClass([self class]);
+    if (AP_DEBUG_METHODS) { MLog()}
+    return NSStringFromClass([self class]);
 }
 
 
@@ -241,55 +247,56 @@ static NSString* const APReferenceCountKey = @"APReferenceCountKey";
  Return Value:  An incremental store node encapsulating the persistent external values of the object with object ID objectID, or nil if the corresponding object cannot be found.
  
  Discussion:    The returned node should include all attributes values and may include to-one relationship values as instances of NSManagedObjectID.
- If an object with object ID objectID cannot be found, the method should return nil and—if error is not NULL—create and return an appropriate error object in error.
+                If an object with object ID objectID cannot be found, the method should return nil and—if error is not NULL—create and return an appropriate error object in error.
  
  This method is used in 2 scenarios: When an object is fulfilling a fault, and before a save on updated objects to grab a copy from the server for merge conflict purposes.
  */
 - (NSIncrementalStoreNode *)newValuesForObjectWithID:(NSManagedObjectID *)objectID
                                          withContext:(NSManagedObjectContext *)context
                                                error:(NSError **)error {
-  if (AP_DEBUG_METHODS) { MLog()}
-  
-  if (AP_DEBUG_INFO) {DLog(@"new values for object with id %@", [context objectWithID:objectID])}
-  
-  NSString* objectUID = [self referenceObjectForObjectID:objectID];
-  NSDictionary *objectFromCache = [self.diskCache fetchObjectRepresentationForObjectUID:objectUID entityName:objectID.entity.name];
-  
-  if (!objectFromCache) {
-    //        [NSException raise:APIncrementalStoreExceptionIncompatibleRequest format:@"Cache object with managed objectUID %@ not found.", objectUID];
-    // object has been deleted ?
-    return nil;
-  }
-  
-  // Create dictionary of keys and values for incremental store node
-  NSMutableDictionary *dictionaryRepresentationOfCacheObject = [NSMutableDictionary dictionary];
-  
-  // Attributes
-  NSArray* entityAttributes = [[[objectID entity] attributesByName] allKeys];
-  [[objectFromCache dictionaryWithValuesForKeys:entityAttributes] enumerateKeysAndObjectsUsingBlock:^(id attributeName, id attributeValue, BOOL *stop) {
-    if (attributeValue != [NSNull null]) {
-      dictionaryRepresentationOfCacheObject[attributeName] = attributeValue;
-    }
-  }];
-  
-  // To-One relationships
-  NSArray* entityRelationships = [[[objectID entity] relationshipsByName] allKeys];
-  [[objectFromCache dictionaryWithValuesForKeys:entityRelationships] enumerateKeysAndObjectsUsingBlock:^(id relationshipName, id relationshipValue, BOOL *stop) {
+    if (AP_DEBUG_METHODS) { MLog()}
     
-    if (![[[objectID entity]relationshipsByName][relationshipName] isToMany]) {
-      
-      if (relationshipValue == [NSNull null] || relationshipValue == nil) {
-        dictionaryRepresentationOfCacheObject[relationshipName] = [NSNull null];
-        
-      } else {
-        NSRelationshipDescription* relationship = [[objectID entity] relationshipsByName][relationshipName];
-        NSManagedObjectID *relationshipObjectID = [self managedObjectIDForEntity:relationship.destinationEntity withObjectUID:relationshipValue];
-        dictionaryRepresentationOfCacheObject[relationshipName] = relationshipObjectID;
-      }
+    NSString* objectUID = [self referenceObjectForObjectID:objectID];
+    if (AP_DEBUG_INFO) {DLog(@"New values for entity: %@ with id %@", objectID.entity.name, objectUID)}
+    
+    NSDictionary *objectFromCache = [self.diskCache fetchObjectRepresentationForObjectUID:objectUID entityName:objectID.entity.name];
+    
+    if (!objectFromCache) {
+//        [NSException raise:APIncrementalStoreExceptionIncompatibleRequest format:@"Cache object with managed objectUID %@ not found.", objectUID];
+        // object has been deleted ?
+        return nil;
     }
-  }];
-  NSIncrementalStoreNode *node = [[NSIncrementalStoreNode alloc] initWithObjectID:objectID withValues:dictionaryRepresentationOfCacheObject version:1];
-  return node;
+    
+    // Create dictionary of keys and values for incremental store node
+    NSMutableDictionary *dictionaryRepresentationOfCacheObject = [NSMutableDictionary dictionary];
+    
+    // Attributes
+    NSArray* entityAttributes = [[[objectID entity] attributesByName] allKeys];
+    [[objectFromCache dictionaryWithValuesForKeys:entityAttributes] enumerateKeysAndObjectsUsingBlock:^(id attributeName, id attributeValue, BOOL *stop) {
+        if (attributeValue != [NSNull null]) {
+            dictionaryRepresentationOfCacheObject[attributeName] = attributeValue;
+        }
+    }];
+    
+    // To-One relationships
+    NSArray* entityRelationships = [[[objectID entity] relationshipsByName] allKeys];
+    [[objectFromCache dictionaryWithValuesForKeys:entityRelationships] enumerateKeysAndObjectsUsingBlock:^(id relationshipName, id relationshipValue, BOOL *stop) {
+        
+        if (![[[objectID entity]relationshipsByName][relationshipName] isToMany]) {
+            
+            if (relationshipValue == [NSNull null] || relationshipValue == nil) {
+                dictionaryRepresentationOfCacheObject[relationshipName] = [NSNull null];
+                
+            } else {
+                NSRelationshipDescription* relationship = [[objectID entity] relationshipsByName][relationshipName];
+                NSString* relatedObjectID = [[relationshipValue allValues]lastObject];
+                NSManagedObjectID *relationshipObjectID = [self managedObjectIDForEntity:relationship.destinationEntity withObjectUID:relatedObjectID];
+                dictionaryRepresentationOfCacheObject[relationshipName] = relationshipObjectID;
+            }
+        }
+    }];
+    NSIncrementalStoreNode *node = [[NSIncrementalStoreNode alloc] initWithObjectID:objectID withValues:dictionaryRepresentationOfCacheObject version:1];
+    return node;
 }
 
 
@@ -308,70 +315,74 @@ static NSString* const APReferenceCountKey = @"APReferenceCountKey";
               forObjectWithID:(NSManagedObjectID *)objectID
                   withContext:(NSManagedObjectContext *)context
                         error:(NSError * __autoreleasing *)error {
-  
-  if (AP_DEBUG_METHODS) { MLog() }
-  
-  NSString* objectUID = [self referenceObjectForObjectID:objectID];
-  
-  NSFetchRequest *fr = [[NSFetchRequest alloc] initWithEntityName:objectID.entity.name];
-  fr.predicate = [NSPredicate predicateWithFormat:@"%K == %@", APObjectUIDAttributeName, objectUID];
-  
-  NSError *fetchError = nil;
-  NSArray *results = [self.diskCache fetchObjectRepresentations:fr error:&fetchError];
-  
-  if (fetchError || [results count] > 1) {
-    // TODO handle error
-  }
-  
-  NSManagedObject *objectFromCache = [results lastObject];
-  
-  if (!objectFromCache) {
-    // [NSException raise:APIncrementalStoreExceptionIncompatibleRequest format:@"Cache object with managed objectUUID %@ not found.", objectUUID];
-    // object has been deleted ?
-    return nil;
-  }
-  
-  if ([relationship isToMany]) {
     
-    // to-many: pull related object set from cache
-    // value should be the cache object reference for the related object, if the relationship value is not nil
+    if (AP_DEBUG_METHODS) { MLog() }
     
-    __block NSMutableArray *arrayToReturn = [NSMutableArray array];
+    NSString* objectUID = [self referenceObjectForObjectID:objectID];
     
-    NSArray *relatedObjectCacheReferenceSet = [[objectFromCache valueForKey:[relationship name]] allObjects];
-    if ([relatedObjectCacheReferenceSet count] > 0) {
-      
-      [relatedObjectCacheReferenceSet enumerateObjectsUsingBlock:^(id cacheManagedObjectReference, NSUInteger idx, BOOL *stop) {
+    if (AP_DEBUG_INFO) {DLog(@"New values for relationship: %@ for entity: %@ with id %@", relationship, objectID.entity.name, objectUID)}
+    
+    NSFetchRequest *fr = [[NSFetchRequest alloc] initWithEntityName:objectID.entity.name];
+    fr.predicate = [NSPredicate predicateWithFormat:@"%K == %@", APObjectUIDAttributeName, objectUID];
+    
+    NSError *fetchError = nil;
+    NSArray *results = [self.diskCache fetchObjectRepresentations:fr error:&fetchError];
+    
+    if (fetchError || [results count] > 1) {
+        // TODO handle error
+    }
+    
+    NSDictionary* objectFromCache = [results lastObject];
+    
+    if (!objectFromCache) {
+       // [NSException raise:APIncrementalStoreExceptionIncompatibleRequest format:@"Cache object with managed objectUUID %@ not found.", objectUUID];
+        // object has been deleted ?
+        return nil;
+    }
+    
+    if ([relationship isToMany]) {
         
-        NSManagedObjectID *managedObjectID = [self managedObjectIDForEntity:[relationship destinationEntity] withObjectUID:cacheManagedObjectReference];
-        [arrayToReturn addObject:managedObjectID];
-      }];
-    }
-    
-    return arrayToReturn;
-    
-  } else {
-    
-    // to-one: pull related object from cache
-    // value should be the cache object reference for the related object, if the relationship value is not nil
-    
-    NSManagedObject *relatedObjectCacheReferenceObject = [objectFromCache valueForKey:[relationship name]];
-    
-    if (!relatedObjectCacheReferenceObject) {
-      
-      return [NSNull null];
-      
+        // to-many: pull related object set from cache
+        // value should be the cache object reference for the related object, if the relationship value is not nil
+        
+        __block NSMutableArray *arrayToReturn = [NSMutableArray array];
+        
+        NSDictionary *relatedObjectCacheReferenceDict = objectFromCache[[relationship name]];
+        if ([relatedObjectCacheReferenceDict count] > 0) {
+            
+            [relatedObjectCacheReferenceDict enumerateKeysAndObjectsUsingBlock:^(NSString* entityName, NSArray* cacheManagedObjectReferences, BOOL *stop) {
+                NSEntityDescription* destinationEntity = [NSEntityDescription entityForName:entityName inManagedObjectContext:context];
+                [cacheManagedObjectReferences enumerateObjectsUsingBlock:^(NSString* cacheManagedObjectReference, NSUInteger idx, BOOL *stop) {
+                    NSManagedObjectID *managedObjectID = [self managedObjectIDForEntity:destinationEntity withObjectUID:cacheManagedObjectReference];
+                    [arrayToReturn addObject:managedObjectID];
+                }];
+            }];
+        }
+        
+        return arrayToReturn;
+        
     } else {
-      
-      // If primary key includes the nil string, this was just a reference and we need to retreive online, if possible
-      NSString *relatedObjectUUID = [relatedObjectCacheReferenceObject valueForKey:APObjectUIDAttributeName];
-      
-      // Use primary key id to create in-memory context managed object ID equivalent
-      NSManagedObjectID *managedObjectID = [self managedObjectIDForEntity:[relationship destinationEntity] withObjectUID:relatedObjectUUID];
-      
-      return managedObjectID;
+        
+        // to-one: pull related object from cache
+        // value should be the cache object reference for the related object, if the relationship value is not nil
+        
+        NSDictionary *relatedObjectCacheReferenceDict = objectFromCache[[relationship name]];
+        
+        if (!relatedObjectCacheReferenceDict) {
+            return nil; //[NSNull null];
+            
+        } else {
+            
+            NSString *entityName = [[relatedObjectCacheReferenceDict allValues]lastObject];
+            NSString *relatedObjectUID = [[relatedObjectCacheReferenceDict allKeys]lastObject];
+            NSEntityDescription* destinationEntity = [NSEntityDescription entityForName:entityName inManagedObjectContext:context];
+            
+            // Use primary key id to create in-memory context managed object ID equivalent
+            NSManagedObjectID *managedObjectID = [self managedObjectIDForEntity:destinationEntity withObjectUID:relatedObjectUID];
+            
+            return managedObjectID;
+        }
     }
-  }
 }
 
 /*
@@ -379,51 +390,51 @@ static NSString* const APReferenceCountKey = @"APReferenceCountKey";
  This method is called before executeRequest:withContext:error: with a save request, to assign permanent IDs to newly-inserted objects.
  */
 - (NSArray *)obtainPermanentIDsForObjects:(NSArray *)array error:(NSError *__autoreleasing *)error {
-  
-  if (AP_DEBUG_METHODS) { MLog() }
-  
-  if (array == nil) {
-    return @[];
-  }
-  
-  return [array map:^id(NSManagedObject* managedObject) {
-    NSString *tempObjectUID = [self.diskCache createObjectUID];
-    if (!tempObjectUID) {
-      // Redundant Exception
-      [NSException raise:APIncrementalStoreExceptionInconsistency format:@"Error obtaining permanent objectID for object:%@", managedObject];
+    
+    if (AP_DEBUG_METHODS) { MLog() }
+    
+    if (array == nil) {
+        return @[];
     }
     
-    NSManagedObjectID *returnId = [self managedObjectIDForEntity: managedObject.entity withObjectUID:tempObjectUID];
-    if (AP_DEBUG_INFO) { DLog(@"Permanent ID assigned is %@", tempObjectUID) }
-    
-    return returnId;
-  }];
+    return [array map:^id(NSManagedObject* managedObject) {
+        NSString *tempObjectUID = [self.diskCache createObjectUID];
+        if (!tempObjectUID) {
+            // Redundant Exception
+            [NSException raise:APIncrementalStoreExceptionInconsistency format:@"Error obtaining permanent objectID for object:%@", managedObject];
+        }
+        
+        NSManagedObjectID *permanentID = [self managedObjectIDForEntity: managedObject.entity withObjectUID:tempObjectUID];
+        if (AP_DEBUG_INFO) { DLog(@"Entity: %@ had its temporary ID: %@ replaced by a permanent ID: %@", managedObject.entity.name, tempObjectUID, permanentID) }
+        
+        return permanentID;
+    }];
 }
 
 
 - (id)executeRequest:(NSPersistentStoreRequest *)request
          withContext:(NSManagedObjectContext *)context
                error:(NSError *__autoreleasing *)error {
-  
-  if (AP_DEBUG_METHODS) { MLog() }
-  
-  id result = nil;
-  
-  switch (request.requestType) {
-      
-    case NSSaveRequestType:
-      result = [self AP_handleSaveRequest:(NSSaveChangesRequest *) request withContext:context error:error];
-      break;
-      
-    case NSFetchRequestType:
-      result = [self AP_handleFetchRequest:(NSFetchRequest *) request withContext:context error:error];
-      break;
-      
-    default:
-      [NSException raise:APIncrementalStoreExceptionIncompatibleRequest format:@"Unknown request type."];
-      break;
-  }
-  return result;
+    
+    if (AP_DEBUG_METHODS) { MLog() }
+    
+    id result = nil;
+    
+    switch (request.requestType) {
+            
+        case NSSaveRequestType:
+            result = [self AP_handleSaveRequest:(NSSaveChangesRequest *) request withContext:context error:error];
+            break;
+            
+        case NSFetchRequestType:
+            result = [self AP_handleFetchRequest:(NSFetchRequest *) request withContext:context error:error];
+            break;
+            
+        default:
+            [NSException raise:APIncrementalStoreExceptionIncompatibleRequest format:@"Unknown request type."];
+            break;
+    }
+    return result;
 }
 
 
@@ -432,33 +443,33 @@ static NSString* const APReferenceCountKey = @"APReferenceCountKey";
 - (id)AP_handleFetchRequest:(NSFetchRequest *)request
                 withContext:(NSManagedObjectContext *)context
                       error:(NSError * __autoreleasing *)error {
-  
-  if (AP_DEBUG_METHODS) { MLog() }
-  
-  switch (request.resultType) {
-      
-    case NSManagedObjectResultType:
-      return [self AP_fetchManagedObjects:request withContext:context error:error];
-      break;
-      
-    case NSManagedObjectIDResultType:
-      return [self AP_fetchManagedObjectIDs:request withContext:context error:error];
-      break;
-      
-    case NSDictionaryResultType:
-      [NSException raise:APIncrementalStoreExceptionIncompatibleRequest format:@"Unimplemented result type requested."];
-      break;
-      
-    case NSCountResultType:
-      return [self AP_fetchCount:request withContext:context error:error];
-      break;
-      
-    default:
-      [NSException raise:APIncrementalStoreExceptionIncompatibleRequest format:@"Unknown result type requested."];
-      break;
-  }
-  
-  return nil;
+    
+    if (AP_DEBUG_METHODS) { MLog() }
+    
+    switch (request.resultType) {
+            
+        case NSManagedObjectResultType:
+            return [self AP_fetchManagedObjects:request withContext:context error:error];
+            break;
+            
+        case NSManagedObjectIDResultType:
+            return [self AP_fetchManagedObjectIDs:request withContext:context error:error];
+            break;
+            
+        case NSDictionaryResultType:
+            [NSException raise:APIncrementalStoreExceptionIncompatibleRequest format:@"Unimplemented result type requested."];
+            break;
+            
+        case NSCountResultType:
+            return [self AP_fetchCount:request withContext:context error:error];
+            break;
+            
+        default:
+            [NSException raise:APIncrementalStoreExceptionIncompatibleRequest format:@"Unknown result type requested."];
+            break;
+    }
+    
+    return nil;
 }
 
 
@@ -466,35 +477,37 @@ static NSString* const APReferenceCountKey = @"APReferenceCountKey";
 - (NSArray*) AP_fetchManagedObjects:(NSFetchRequest *)fetchRequest
                         withContext:(NSManagedObjectContext *)context
                               error:(NSError * __autoreleasing*)error {
-  
-  if (AP_DEBUG_METHODS) { MLog() }
-  
-  NSError *localCacheError = nil;
-  NSArray *cacheRepresentations = [self.diskCache fetchObjectRepresentations:fetchRequest error:&localCacheError];
-  
-  if (localCacheError != nil) {
-    if (error != NULL) {
-      *error = localCacheError;
-    }
-    return nil;
-  }
-  
-  __block NSMutableArray *results = [NSMutableArray array];
-  
-  [cacheRepresentations enumerateObjectsUsingBlock:^(id cacheManagedObjectRep, NSUInteger idx, BOOL *stop) {
-    NSString *objectUID = [cacheManagedObjectRep valueForKey:APObjectUIDAttributeName];
-    NSManagedObjectID* managedObjectID = [self managedObjectIDForEntity:fetchRequest.entity withObjectUID:objectUID];
-    // NSManagedObjectID* managedObjectID = [self newObjectIDForEntity:fetchRequest.entity referenceObject:objectUID];
     
-    // Allows us to always return object, faulted or not
-    NSManagedObject* managedObject = [context objectWithID:managedObjectID];
+    if (AP_DEBUG_METHODS) { MLog() }
     
-    if (![managedObject isFault]) {
-      [self populateManagedObject:managedObject withRepresentation:cacheManagedObjectRep callingContext:context entity:fetchRequest.entity];
+    NSError *localCacheError = nil;
+    NSArray *cacheRepresentations = [self.diskCache fetchObjectRepresentations:fetchRequest error:&localCacheError];
+    
+    if (localCacheError != nil) {
+        if (error != NULL) {
+            *error = localCacheError;
+        }
+        return nil;
     }
-    [results addObject:managedObject];
-  }];
-  return results;
+    
+    __block NSMutableArray *results = [NSMutableArray array];
+    
+    [cacheRepresentations enumerateObjectsUsingBlock:^(id cacheManagedObjectRep, NSUInteger idx, BOOL *stop) {
+        NSString *objectUID = [cacheManagedObjectRep valueForKey:APObjectUIDAttributeName];
+        NSManagedObjectID* managedObjectID = [self managedObjectIDForEntity:fetchRequest.entity withObjectUID:objectUID];
+        
+        // Allows us to always return object, faulted or not
+        NSManagedObject* managedObject = [context objectWithID:managedObjectID];
+        
+        if (![managedObject isFault]) {
+            [self populateManagedObject:managedObject withRepresentation:cacheManagedObjectRep callingContext:context entity:fetchRequest.entity];
+        }
+        [results addObject:managedObject];
+    }];
+    
+    if (AP_DEBUG_INFO) {DLog(@"Return objects requested: %@",results)}
+    
+    return results;
 }
 
 
@@ -502,45 +515,45 @@ static NSString* const APReferenceCountKey = @"APReferenceCountKey";
 - (id) AP_fetchManagedObjectIDs:(NSFetchRequest *)fetchRequest
                     withContext:(NSManagedObjectContext *)context
                           error:(NSError *__autoreleasing *)error {
-  
-  if (AP_DEBUG_METHODS) { MLog() }
-  
-  NSFetchRequest *fetchCopy = [fetchRequest copy];
-  
-  [fetchCopy setResultType:NSManagedObjectResultType];
-  
-  if ([fetchRequest fetchBatchSize] > 0) {
-    [fetchCopy setFetchBatchSize:[fetchRequest fetchBatchSize]];
-  }
-  
-  NSArray *objects = [self AP_fetchManagedObjects:fetchCopy withContext:context error:error];
-  
-  if (error != NULL && *error != nil) {
-    return nil;
-  }
-  
-  return [objects map:^(id item) {
-    return [item objectID];
-  }];
+    
+    if (AP_DEBUG_METHODS) { MLog() }
+    
+    NSFetchRequest *fetchCopy = [fetchRequest copy];
+    
+    [fetchCopy setResultType:NSManagedObjectResultType];
+    
+    if ([fetchRequest fetchBatchSize] > 0) {
+        [fetchCopy setFetchBatchSize:[fetchRequest fetchBatchSize]];
+    }
+    
+    NSArray *objects = [self AP_fetchManagedObjects:fetchCopy withContext:context error:error];
+    
+    if (error != NULL && *error != nil) {
+        return nil;
+    }
+    
+    return [objects map:^(id item) {
+        return [item objectID];
+    }];
 }
 
 
 - (NSArray *) AP_fetchCount:(NSFetchRequest *)fetchRequest
                 withContext:(NSManagedObjectContext *)context
                       error:(NSError * __autoreleasing *)error {
-  
-  if (AP_DEBUG_METHODS) { MLog() }
-  
-  NSError *localCacheError = nil;
-  NSUInteger localCacheCount = [self.diskCache countObjectRepresentations:fetchRequest error:&localCacheError];
-  
-  // Error check
-  if (localCacheError != nil) {
-    *error = localCacheError;
-    return nil;
-  }
-  
-  return @[@(localCacheCount)];
+    
+    if (AP_DEBUG_METHODS) { MLog() }
+    
+    NSError *localCacheError = nil;
+    NSUInteger localCacheCount = [self.diskCache countObjectRepresentations:fetchRequest error:&localCacheError];
+    
+    // Error check
+    if (localCacheError != nil) {
+        *error = localCacheError;
+        return nil;
+    }
+    
+    return @[@(localCacheCount)];
 }
 
 
@@ -560,55 +573,55 @@ static NSString* const APReferenceCountKey = @"APReferenceCountKey";
 - (id)AP_handleSaveRequest:(NSSaveChangesRequest *)saveRequest
                withContext:(NSManagedObjectContext *)context
                      error:(NSError *__autoreleasing *)error {
-  
-  if (AP_DEBUG_METHODS) {MLog()}
-  
-  NSSet *insertedObjects = [saveRequest insertedObjects];
-  NSSet *updatedObjects = [saveRequest updatedObjects];
-  NSSet *deletedObjects = [saveRequest deletedObjects];
-  
-  __block NSError* localError;
-  
-  if ([insertedObjects count] > 0) {
-    NSDictionary* insertedObjectRepresentations = [self representationsFromManagedObjects:[insertedObjects allObjects]];
     
-    [insertedObjectRepresentations enumerateKeysAndObjectsUsingBlock:^(NSString* entityName, NSArray* representations, BOOL *stop) {
-      
-      if (![self.diskCache inserteObjectRepresentations:representations entityName:entityName error:&localError]) {
-        *stop = YES;
-        *error = localError;
-      }
-    }];
-    if (localError) return nil;
-  }
-  
-  if ([updatedObjects count] > 0) {
-    NSDictionary* updatedObjectRepresentations = [self representationsFromManagedObjects:[updatedObjects allObjects]];
+    if (AP_DEBUG_METHODS) {MLog()}
     
-    [updatedObjectRepresentations enumerateKeysAndObjectsUsingBlock:^(NSString* entityName, NSArray* representations, BOOL *stop) {
-      
-      if (![self.diskCache updateObjectRepresentations:representations entityName:entityName error:&localError]){
-        *stop = YES;
-        *error = localError;
-      }
-    }];
-    if (localError) return nil;
-  }
-  
-  if ([deletedObjects count] > 0) {
-    NSDictionary* deletedObjectRepresentations = [self representationsFromManagedObjects:[deletedObjects allObjects]];
+    NSSet *insertedObjects = [saveRequest insertedObjects];
+    NSSet *updatedObjects = [saveRequest updatedObjects];
+    NSSet *deletedObjects = [saveRequest deletedObjects];
     
-    [deletedObjectRepresentations enumerateKeysAndObjectsUsingBlock:^(NSString* entityName, NSArray* representations, BOOL *stop) {
-      
-      if (![self.diskCache deleteObjectRepresentations:representations entityName:entityName error:&localError]) {
-        *stop = YES;
-        *error = localError;
-      }
-    }];
-    if (localError) return nil;
-  }
-  
-  return @[];
+    __block NSError* localError;
+    
+    if ([insertedObjects count] > 0) {
+        NSDictionary* insertedObjectRepresentations = [self representationsFromManagedObjects:[insertedObjects allObjects]];
+        
+        [insertedObjectRepresentations enumerateKeysAndObjectsUsingBlock:^(NSString* entityName, NSArray* representations, BOOL *stop) {
+            
+            if (![self.diskCache inserteObjectRepresentations:representations entityName:entityName error:&localError]) {
+                *stop = YES;
+                *error = localError;
+            }
+        }];
+        if (localError) return nil;
+    }
+    
+    if ([updatedObjects count] > 0) {
+        NSDictionary* updatedObjectRepresentations = [self representationsFromManagedObjects:[updatedObjects allObjects]];
+        
+        [updatedObjectRepresentations enumerateKeysAndObjectsUsingBlock:^(NSString* entityName, NSArray* representations, BOOL *stop) {
+            
+            if (![self.diskCache updateObjectRepresentations:representations entityName:entityName error:&localError]){
+                *stop = YES;
+                *error = localError;
+            }
+        }];
+        if (localError) return nil;
+    }
+    
+    if ([deletedObjects count] > 0) {
+        NSDictionary* deletedObjectRepresentations = [self representationsFromManagedObjects:[deletedObjects allObjects]];
+        
+        [deletedObjectRepresentations enumerateKeysAndObjectsUsingBlock:^(NSString* entityName, NSArray* representations, BOOL *stop) {
+            
+            if (![self.diskCache deleteObjectRepresentations:representations entityName:entityName error:&localError]) {
+                *stop = YES;
+                *error = localError;
+            }
+        }];
+        if (localError) return nil;
+    }
+    
+    return @[];
 }
 
 
@@ -619,48 +632,48 @@ static NSString* const APReferenceCountKey = @"APReferenceCountKey";
  increment its reference count by 1
  */
 - (void) managedObjectContextDidRegisterObjectsWithIDs:(NSArray *)objectIDs {
-  
-  if (AP_DEBUG_METHODS) {MLog()}
-  
-  // [super managedObjectContextDidRegisterObjectsWithIDs:objectIDs];
-  
-  for (NSManagedObjectID *objectID in objectIDs) {
-    id objectUID = [self referenceObjectForObjectID:objectID];
     
-    if (!objectUID) {
-      if (AP_DEBUG_ERRORS) { ELog(@"ObjectID: %@ does not have objectUID??", objectID)}
-      continue;
+    if (AP_DEBUG_METHODS) {MLog()}
+    
+   // [super managedObjectContextDidRegisterObjectsWithIDs:objectIDs];
+    
+    for (NSManagedObjectID *objectID in objectIDs) {
+        id objectUID = [self referenceObjectForObjectID:objectID];
+        
+        if (!objectUID) {
+            if (AP_DEBUG_ERRORS) { ELog(@"ObjectID: %@ does not have objectUID??", objectID)}
+            continue;
+        }
+        
+        NSMutableDictionary *objectIDsAndRefereceCountByObjectUID = self.mapBetweenManagedObjectIDsAndObjectUIDByEntityName[objectID.entity.name];
+        NSDictionary* objectUIDDictEntry;
+        
+        if (!objectIDsAndRefereceCountByObjectUID) {
+            
+            /* 
+             Entry: {objectID: refereceCount}
+             As the entry was present this is the first reference then @1
+             */
+            
+            objectIDsAndRefereceCountByObjectUID = [NSMutableDictionary dictionary];
+            objectUIDDictEntry = @{APManagedObjectIDKey:objectID,
+                                    APReferenceCountKey:@1};
+            
+        } else {
+            
+            /*
+             Entry: {objectID: refereceCount}
+             get existing entry and increment referece count by 1
+             */
+            
+            NSNumber* referenceCount = [objectIDsAndRefereceCountByObjectUID valueForKey:APReferenceCountKey];
+            objectUIDDictEntry = @{APManagedObjectIDKey:objectID,
+                                   APReferenceCountKey:@([referenceCount integerValue] + 1)};
+        }
+        
+        objectIDsAndRefereceCountByObjectUID[objectUID] = objectUIDDictEntry;
+        self.mapBetweenManagedObjectIDsAndObjectUIDByEntityName[objectID.entity.name] = objectIDsAndRefereceCountByObjectUID;
     }
-    
-    NSMutableDictionary *objectIDsAndRefereceCountByObjectUID = self.mapBetweenManagedObjectIDsAndObjectUIDByEntityName[objectID.entity.name];
-    NSDictionary* objectUIDDictEntry;
-    
-    if (!objectIDsAndRefereceCountByObjectUID) {
-      
-      /*
-       Entry: {objectID: refereceCount}
-       As the entry was present this is the first reference then @1
-       */
-      
-      objectIDsAndRefereceCountByObjectUID = [NSMutableDictionary dictionary];
-      objectUIDDictEntry = @{APManagedObjectIDKey:objectID,
-                             APReferenceCountKey:@1};
-      
-    } else {
-      
-      /*
-       Entry: {objectID: refereceCount}
-       get existing entry and increment referece count by 1
-       */
-      
-      NSNumber* referenceCount = [objectIDsAndRefereceCountByObjectUID valueForKey:APReferenceCountKey];
-      objectUIDDictEntry = @{APManagedObjectIDKey:objectID,
-                             APReferenceCountKey:@([referenceCount integerValue] + 1)};
-    }
-    
-    objectIDsAndRefereceCountByObjectUID[objectUID] = objectUIDDictEntry;
-    self.mapBetweenManagedObjectIDsAndObjectUIDByEntityName[objectID.entity.name] = objectIDsAndRefereceCountByObjectUID;
-  }
 }
 
 
@@ -669,80 +682,81 @@ static NSString* const APReferenceCountKey = @"APReferenceCountKey";
  decrease it by 1 and remove it from the objectIDsAndRefereceCountByObjectUUID if the count == 0
  */
 - (void) managedObjectContextDidUnregisterObjectsWithIDs:(NSArray *)objectIDs {
-  
-  if (AP_DEBUG_METHODS) {MLog()}
-  
-  // [super managedObjectContextDidUnregisterObjectsWithIDs:objectIDs];
-  
-  for (NSManagedObjectID *objectID in objectIDs) {
-    id objectUID = [self referenceObjectForObjectID:objectID];
     
-    if (!objectUID) {
-      if (AP_DEBUG_ERRORS) { ELog(@"ObjectID: %@ does not have objectUID??", objectID)}
-      continue;
+    if (AP_DEBUG_METHODS) {MLog()}
+    
+   // [super managedObjectContextDidUnregisterObjectsWithIDs:objectIDs];
+    
+    for (NSManagedObjectID *objectID in objectIDs) {
+        id objectUID = [self referenceObjectForObjectID:objectID];
+        
+        if (!objectUID) {
+            if (AP_DEBUG_ERRORS) { ELog(@"ObjectID: %@ does not have objectUID??", objectID)}
+            continue;
+        }
+        
+        NSMutableDictionary *objectIDsAndRefereceCountByObjectUID = self.mapBetweenManagedObjectIDsAndObjectUIDByEntityName[objectID.entity.name];
+        NSDictionary* objectUIDDictEntry;
+        
+        if (!objectIDsAndRefereceCountByObjectUID) {
+            if (AP_DEBUG_ERRORS) { ELog(@"ObjectID: %@ isn't registred in self.mapBetweenObjectIDsAndObjectUIDByEntityName ??", objectID)}
+            continue;
+            
+        } else {
+            
+            /*
+             Entry: {objectID: refereceCount}
+             get existing entry and increment referece count by 1
+             */
+            
+            NSNumber* referenceCount = objectIDsAndRefereceCountByObjectUID[APReferenceCountKey];
+            
+            if ([referenceCount integerValue] == 1) {
+                
+                /* 
+                 No context holds reference for this managedObjectID anymore,
+                 we can remove it from objectIDsAndRefereceCountByObjectUUID
+                 */
+                
+                [objectIDsAndRefereceCountByObjectUID removeObjectForKey:objectUID];
+                
+            } else {
+                objectUIDDictEntry = @{APManagedObjectIDKey:objectID,
+                                        APReferenceCountKey:@([referenceCount integerValue] - 1)};
+            }
+        }
     }
-    
-    NSMutableDictionary *objectIDsAndRefereceCountByObjectUID = self.mapBetweenManagedObjectIDsAndObjectUIDByEntityName[objectID.entity.name];
-    NSDictionary* objectUIDDictEntry;
-    
-    if (!objectIDsAndRefereceCountByObjectUID) {
-      if (AP_DEBUG_ERRORS) { ELog(@"ObjectID: %@ isn't registred in self.mapBetweenObjectIDsAndObjectUIDByEntityName ??", objectID)}
-      continue;
-      
-    } else {
-      
-      /*
-       Entry: {objectID: refereceCount}
-       get existing entry and increment referece count by 1
-       */
-      
-      NSNumber* referenceCount = objectIDsAndRefereceCountByObjectUID[APReferenceCountKey];
-      
-      if ([referenceCount integerValue] == 1) {
-        
-        /*
-         No context holds reference for this managedObjectID anymore,
-         we can remove it from objectIDsAndRefereceCountByObjectUUID
-         */
-        
-        [objectIDsAndRefereceCountByObjectUID removeObjectForKey:objectUID];
-        
-      } else {
-        objectUIDDictEntry = @{APManagedObjectIDKey:objectID,
-                               APReferenceCountKey:@([referenceCount integerValue] - 1)};
-      }
-    }
-  }
 }
 
 
 #pragma mark - Notification Handlers
 
 - (void) didReceiveSyncNotifcation: (NSNotification*) note {
-  
-  if (AP_DEBUG_METHODS) {MLog() }
-  [self syncLocalCacheAllRemoteObjects:NO];
+    
+    if (AP_DEBUG_METHODS) {MLog() }
+    [self syncLocalCacheAllRemoteObjects:NO];
 }
 
 
 - (void) didReceiveFullSyncNotifcation: (NSNotification*) note {
-  
-  if (AP_DEBUG_METHODS) { MLog()}
-  [self syncLocalCacheAllRemoteObjects:YES];
+    
+    if (AP_DEBUG_METHODS) { MLog()}
+    [self syncLocalCacheAllRemoteObjects:YES];
 }
 
 
 - (void) didReceiveResetCacheNotifcation: (NSNotification*) note {
-  
-  if (AP_DEBUG_METHODS) { MLog()}
-  [self.diskCache resetCache];
-  [[NSNotificationCenter defaultCenter]postNotificationName:APNotificationCacheDidFinishReset object:self];
+    
+    if (AP_DEBUG_METHODS) { MLog()}
+    [self.diskCache resetCache];
+    [[NSNotificationCenter defaultCenter]postNotificationName:APNotificationCacheDidFinishReset object:self];
 }
 
 
 #pragma mark - Sync Local Cache
 
 - (void) syncLocalCacheAllRemoteObjects:(BOOL) allRemoteObjects {
+    
     if (AP_DEBUG_METHODS) { MLog()}
     
     [self.diskCache syncAllObjects:allRemoteObjects onCountingObjects:^(NSInteger localObjects, NSInteger remoteObjects) {
@@ -771,49 +785,49 @@ static NSString* const APReferenceCountKey = @"APReferenceCountKey";
  objectUIDsNestedByEntityName has the following format:
  
  { EntityName1 = {
- inserted = (
- objectUID,
- objectUID,
- ...,
- objectUID
- );
- updated = (
- objectUID,
- objectUID,
- ...,
- objectUID
- );
- deleted = (
- objectUID,
- objectUID,
- ...,
- objectUID
- );
- }
- EntityName2 = {...}
+        inserted = (
+            objectUID,
+            objectUID,
+            ...,
+            objectUID
+        );
+        updated = (
+            objectUID,
+            objectUID,
+            ...,
+            objectUID
+        );
+        deleted = (
+            objectUID,
+            objectUID,
+            ...,
+            objectUID
+        );
+    }
+    EntityName2 = {...}
  }
  
  The objective is to create a translated dictionary with the same formart as Core Data sends with NSManagedObjectContextObjectsDidChangeNotification
- */
+*/
 - (NSDictionary*) translateObjectUIDsToManagedObjectIDs: (NSDictionary*) objectUIDsNestedByEntityNameAndStatus {
-  
-  __block NSMutableDictionary* translatedDictionary = [NSMutableDictionary dictionary];
-  
-  [objectUIDsNestedByEntityNameAndStatus enumerateKeysAndObjectsUsingBlock:^(NSString* entity, NSDictionary* objectsUIDsNestedByStatus, BOOL *stop) {
-    NSEntityDescription* entityDescription = [[self.model entitiesByName] objectForKey:entity];
+ 
+    __block NSMutableDictionary* translatedDictionary = [NSMutableDictionary dictionary];
     
-    [objectsUIDsNestedByStatus enumerateKeysAndObjectsUsingBlock:^(NSString* status, NSArray* objectUIDs, BOOL *stop) {
-      __block NSMutableArray* managedObjectIDs = [NSMutableArray array];
-      
-      [objectUIDs enumerateObjectsUsingBlock:^(NSString* objectUID, NSUInteger idx, BOOL *stop) {
-        [managedObjectIDs addObject:[self managedObjectIDForEntity:entityDescription withObjectUID:objectUID]];
-      }];
-      NSMutableArray* entriesForStatus = translatedDictionary[status] ?: [NSMutableArray array];
-      [entriesForStatus addObjectsFromArray:managedObjectIDs];
-      translatedDictionary[status] = entriesForStatus;
+    [objectUIDsNestedByEntityNameAndStatus enumerateKeysAndObjectsUsingBlock:^(NSString* entity, NSDictionary* objectsUIDsNestedByStatus, BOOL *stop) {
+        NSEntityDescription* entityDescription = [[self.model entitiesByName] objectForKey:entity];
+        
+        [objectsUIDsNestedByStatus enumerateKeysAndObjectsUsingBlock:^(NSString* status, NSArray* objectUIDs, BOOL *stop) {
+            __block NSMutableArray* managedObjectIDs = [NSMutableArray array];
+            
+            [objectUIDs enumerateObjectsUsingBlock:^(NSString* objectUID, NSUInteger idx, BOOL *stop) {
+                [managedObjectIDs addObject:[self managedObjectIDForEntity:entityDescription withObjectUID:objectUID]];
+            }];
+            NSMutableArray* entriesForStatus = translatedDictionary[status] ?: [NSMutableArray array];
+            [entriesForStatus addObjectsFromArray:managedObjectIDs];
+            translatedDictionary[status] = entriesForStatus;
+        }];
     }];
-  }];
-  return translatedDictionary;
+    return translatedDictionary;
 }
 
 
@@ -821,117 +835,114 @@ static NSString* const APReferenceCountKey = @"APReferenceCountKey";
 
 - (NSManagedObjectID*) managedObjectIDForEntity:(NSEntityDescription*) entityDescription
                                   withObjectUID:(NSString*) objectUID {
-  
-  if (AP_DEBUG_METHODS) { MLog() }
-  
-  if (!objectUID) {
-    if (AP_DEBUG_ERRORS) {ELog(@"Error - uniqueIdentifier == nil")}
-    return nil;
-  }
-  
-  NSManagedObjectID *managedObjectID = nil;
-  
-  // Check if we have it created already
-  NSMutableDictionary *objectIDsAndRefCountByObjectUID = self.mapBetweenManagedObjectIDsAndObjectUIDByEntityName[entityDescription.name];
-  
-  if (objectIDsAndRefCountByObjectUID) {
-    NSDictionary* objectUIDEntry = objectIDsAndRefCountByObjectUID[objectUID];
     
-    if (!objectUIDEntry) {
-      managedObjectID = [self newObjectIDForEntity:entityDescription referenceObject:objectUID];
-      
-    } else {
-      managedObjectID = objectUIDEntry[APManagedObjectIDKey];
-      NSAssert([managedObjectID isKindOfClass:[NSManagedObjectID class]],@"returned object should be of NSManagedObjectId kind");
+    if (AP_DEBUG_METHODS) { MLog() }
+    
+    if (!objectUID) {
+        if (AP_DEBUG_ERRORS) {ELog(@"Error - uniqueIdentifier == nil")}
+        return nil;
     }
     
-  } else {
-    /*
-     After created it will call managedObjectContextDidRegisterObjectsWithIDs:
-     then we have the oportunity cache it in self.mapBetweenObjectIDsAndObjectUUIDByEntityName
-     */
-    managedObjectID = [self newObjectIDForEntity:entityDescription referenceObject:objectUID];
+    NSManagedObjectID *managedObjectID = nil;
     
-  }
-  
-  return managedObjectID;
+    // Check if we have it created already
+    NSMutableDictionary *objectIDsAndRefCountByObjectUID = self.mapBetweenManagedObjectIDsAndObjectUIDByEntityName[entityDescription.name];
+    
+    if (objectIDsAndRefCountByObjectUID) {
+        NSDictionary* objectUIDEntry = objectIDsAndRefCountByObjectUID[objectUID];
+        
+        if (!objectUIDEntry) {
+             managedObjectID = [self newObjectIDForEntity:entityDescription referenceObject:objectUID];
+        
+        } else {
+            managedObjectID = objectUIDEntry[APManagedObjectIDKey];
+            NSAssert([managedObjectID isKindOfClass:[NSManagedObjectID class]],@"returned object should be of NSManagedObjectId kind");
+        }
+        
+    } else {
+        /*
+         After created it will call managedObjectContextDidRegisterObjectsWithIDs:
+         then we have the oportunity cache it in self.mapBetweenObjectIDsAndObjectUIDByEntityName
+         */
+        managedObjectID = [self newObjectIDForEntity:entityDescription referenceObject:objectUID];
+    }
+    return managedObjectID;
 }
 
 
-#pragma mark - Translate Managed Objects to Representations
+#pragma mark - Translate Managed Objects to Representations 
 
 /**
  Returns a NSDictionary keyed by entity name with NSArrays of representations as objects.
  */
 - (NSDictionary*) representationsFromManagedObjects: (NSArray*) managedObjects {
-  
-  if (AP_DEBUG_METHODS) { MLog() }
-  
-  NSMutableDictionary* representations = [[NSMutableDictionary alloc]init];
-  
-  [managedObjects enumerateObjectsUsingBlock:^(NSManagedObject* managedObject, NSUInteger idx, BOOL *stop) {
-    NSString* entityName = managedObject.entity.name;
-    NSMutableArray* objectsForEntity = representations[entityName] ?: [NSMutableArray array];
-    [objectsForEntity addObject:[self representationFromManagedObject:managedObject]];
-    representations[entityName] = objectsForEntity;
-  }];
-  
-  return representations;
+    
+    if (AP_DEBUG_METHODS) { MLog() }
+    
+    NSMutableDictionary* representations = [[NSMutableDictionary alloc]init];
+    
+    [managedObjects enumerateObjectsUsingBlock:^(NSManagedObject* managedObject, NSUInteger idx, BOOL *stop) {
+        NSString* entityName = managedObject.entity.name;
+        NSMutableArray* objectsForEntity = representations[entityName] ?: [NSMutableArray array];
+        [objectsForEntity addObject:[self representationFromManagedObject:managedObject]];
+        representations[entityName] = objectsForEntity;
+    }];
+    
+    return representations;
 }
 
 
 - (NSDictionary*) representationFromManagedObject: (NSManagedObject*) managedObject {
-  
-  if (AP_DEBUG_METHODS) { MLog() }
-  
-  NSMutableDictionary* representation = [[NSMutableDictionary alloc]init];
-  NSDictionary* properties = [managedObject.entity propertiesByName];
-  
-  [properties enumerateKeysAndObjectsUsingBlock:^(NSString* propertyName, NSPropertyDescription* propertyDescription, BOOL *stop) {
-    [managedObject willAccessValueForKey:propertyName];
-    if ([propertyDescription isKindOfClass:[NSAttributeDescription class]]) {
-      
-      // Attribute
-      representation[propertyName] = [managedObject primitiveValueForKey:propertyName] ?: [NSNull null];
-      
-      
-    } else if ([propertyDescription isKindOfClass:[NSRelationshipDescription class]]) {
-      NSRelationshipDescription* relationshipDescription = (NSRelationshipDescription*) propertyDescription;
-      
-      if (!relationshipDescription.isToMany) {
-        
-        // To-One
-        
-        NSManagedObject* relatedObject = [managedObject primitiveValueForKey:propertyName];
-        
-        if (relatedObject) {
-          NSString* objectUID = [self referenceObjectForObjectID:relatedObject.objectID];
-          representation[propertyName] = objectUID;
-        } else {
-          representation[propertyName] = [NSNull null];
+    
+    if (AP_DEBUG_METHODS) { MLog() }
+    
+    NSMutableDictionary* representation = [[NSMutableDictionary alloc]init];
+    NSDictionary* properties = [managedObject.entity propertiesByName];
+    
+    [properties enumerateKeysAndObjectsUsingBlock:^(NSString* propertyName, NSPropertyDescription* propertyDescription, BOOL *stop) {
+        [managedObject willAccessValueForKey:propertyName];
+        [representation setValue:[self referenceObjectForObjectID:managedObject.objectID] forKey:APObjectUIDAttributeName];
+        if ([propertyDescription isKindOfClass:[NSAttributeDescription class]]) {
+            
+            // Attribute
+            representation[propertyName] = [managedObject primitiveValueForKey:propertyName] ?: [NSNull null];
+
+            
+        } else if ([propertyDescription isKindOfClass:[NSRelationshipDescription class]]) {
+            NSRelationshipDescription* relationshipDescription = (NSRelationshipDescription*) propertyDescription;
+            
+            if (!relationshipDescription.isToMany) {
+                
+                // To-One
+                
+                NSManagedObject* relatedObject = [managedObject primitiveValueForKey:propertyName];
+                
+                if (relatedObject) {
+                    NSString* objectUID = [self referenceObjectForObjectID:relatedObject.objectID];
+                    representation[propertyName] = @{relatedObject.entity.name:objectUID};
+                } else {
+                    representation[propertyName] = [NSNull null];
+                }
+                
+            } else {
+                
+                // To-Many
+                
+                NSSet* relatedObjects = [managedObject primitiveValueForKey:propertyName];
+                __block NSMutableDictionary* relatedObjectsRepresentation = [NSMutableDictionary dictionary];
+                
+                [relatedObjects enumerateObjectsUsingBlock:^(NSManagedObject* relatedObject, BOOL *stop) {
+                    NSString* objectUID = [self referenceObjectForObjectID:relatedObject.objectID];
+                    NSMutableArray* relatedObjectsUIDs = [relatedObjectsRepresentation objectForKey:relatedObject.entity.name] ?: [NSMutableArray array];
+                    [relatedObjectsUIDs addObject:objectUID];
+                    relatedObjectsRepresentation[relatedObject.entity.name] = relatedObjectsUIDs;
+                }];
+                representation[propertyName] = relatedObjectsRepresentation;
+            }
         }
-        
-      } else {
-        
-        // To-Many
-        
-        NSSet* relatedObjects = [managedObject primitiveValueForKey:propertyName];
-        __block NSMutableArray* relatedObjectsRepresentation = [[NSMutableArray alloc] initWithCapacity:[relatedObjects count]];
-        [relatedObjects enumerateObjectsUsingBlock:^(NSManagedObject* relatedObject, BOOL *stop) {
-          NSString* objectUID = [self referenceObjectForObjectID:relatedObject.objectID];
-          [relatedObjectsRepresentation addObject:objectUID];
-        }];
-        representation[propertyName] = relatedObjectsRepresentation;
-      }
-    }
-    [managedObject didAccessValueForKey:propertyName];
-  }];
-  
-  if([representation count] > 0) {
-    [representation setValue:[self referenceObjectForObjectID:managedObject.objectID] forKey:APObjectUIDAttributeName];
-  }
-  
-  return representation;
+        [managedObject didAccessValueForKey:propertyName];
+    }];
+    return representation;
 }
 
 
@@ -941,57 +952,66 @@ static NSString* const APReferenceCountKey = @"APReferenceCountKey";
             withRepresentation:(NSDictionary *)dictionary
                 callingContext:(NSManagedObjectContext*)context
                         entity:(NSEntityDescription *)entity {
-  
-  if (AP_DEBUG_METHODS) {MLog(@"%@",[NSThread isMainThread] ? @"" : @" - [BG Thread]")}
-  
-  // Enumerate through properties and set internal storage
-  [dictionary enumerateKeysAndObjectsUsingBlock:^(id propertyName, id propertyValue, BOOL *stop) {
-    [managedObject willChangeValueForKey:propertyName];
-    NSPropertyDescription *propertyDescription = [entity propertiesByName][propertyName];
     
-    // Ignore keys that don't belong to our model
-    if (propertyDescription) {
-      
-      // Attributes
-      if ([propertyDescription isKindOfClass:[NSAttributeDescription class]]) {
-        if (dictionary[propertyName] == [NSNull null]) {
-          [managedObject setPrimitiveValue:nil forKey:propertyName];
-        } else {
-          [managedObject setPrimitiveValue:dictionary[propertyName] forKey:propertyName];
-        }
+    if (AP_DEBUG_METHODS) {MLog(@"%@",[NSThread isMainThread] ? @"" : @" - [BG Thread]")}
+    
+    // Enumerate through properties and set internal storage
+    [dictionary enumerateKeysAndObjectsUsingBlock:^(id propertyName, id propertyValue, BOOL *stop) {
+        [managedObject willChangeValueForKey:propertyName];
+        NSPropertyDescription *propertyDescription = [entity propertiesByName][propertyName];
         
-        // Relationships
-      } else if (![managedObject hasFaultForRelationshipNamed:propertyName]) {
-        NSRelationshipDescription *relationshipDescription = (NSRelationshipDescription *)propertyDescription;
-        
-        // To-many
-        if ([relationshipDescription isToMany]) {
-          NSMutableSet *relatedObjects = [[managedObject primitiveValueForKey:propertyName] mutableCopy];
-          if (relatedObjects != nil) {
-            [relatedObjects removeAllObjects];
-            NSArray *serializedDictSet = dictionary[propertyName];
+        // Ignore keys that don't belong to our model
+        if (propertyDescription) {
             
-            [serializedDictSet enumerateObjectsUsingBlock:^(NSString* objectUUID, NSUInteger idx, BOOL *stop) {
-              NSManagedObjectID* relatedManagedObjectID = [self managedObjectIDForEntity:relationshipDescription.destinationEntity withObjectUID:objectUUID];
-              [relatedObjects addObject:[[managedObject managedObjectContext] objectWithID:relatedManagedObjectID]];
-            }];
-            [managedObject setPrimitiveValue:relatedObjects forKey:propertyName];
-          }
-          
-          // To-one
-        } else {
-          if (dictionary[propertyName] == [NSNull null]) {
-            [managedObject setPrimitiveValue:nil forKey:propertyName];
-          } else {
-            NSManagedObjectID* relatedManagedObjectID = [self managedObjectIDForEntity:relationshipDescription.destinationEntity withObjectUID:dictionary[propertyName]];
-            NSManagedObject *toOneObject = [[managedObject managedObjectContext] objectWithID:relatedManagedObjectID];
-            [managedObject setPrimitiveValue:toOneObject forKey:propertyName];
-          }
+            // Attributes
+            if ([propertyDescription isKindOfClass:[NSAttributeDescription class]]) {
+                if (dictionary[propertyName] == [NSNull null]) {
+                    [managedObject setPrimitiveValue:nil forKey:propertyName];
+                } else {
+                    [managedObject setPrimitiveValue:dictionary[propertyName] forKey:propertyName];
+                }
+                
+            // Relationships
+            } else if (![managedObject hasFaultForRelationshipNamed:propertyName]) {
+                NSRelationshipDescription *relationshipDescription = (NSRelationshipDescription *)propertyDescription;
+                
+                if ([relationshipDescription isToMany]) {
+                    NSMutableSet *relatedObjects = [[managedObject primitiveValueForKey:propertyName] mutableCopy];
+                    if (relatedObjects != nil) {
+                        [relatedObjects removeAllObjects];
+                        NSDictionary *serializedDictSet = dictionary[propertyName];
+                        
+                        [serializedDictSet enumerateKeysAndObjectsUsingBlock:^(NSString* entityName, NSArray* objectUIDs, BOOL *stop) {
+                            
+                            [objectUIDs enumerateObjectsUsingBlock:^(NSString* objectUID, NSUInteger idx, BOOL *stop) {
+                                NSEntityDescription* relatedEntity = [NSEntityDescription entityForName:entityName inManagedObjectContext:context];
+                                NSManagedObjectID* relatedManagedObjectID = [self managedObjectIDForEntity:relatedEntity withObjectUID:objectUID];
+                                [relatedObjects addObject:[[managedObject managedObjectContext] objectWithID:relatedManagedObjectID]];
+                            }];
+                        }];
+                        [managedObject setPrimitiveValue:relatedObjects forKey:propertyName];
+                    }
+                    
+                } else {
+                    
+                     // To-one
+                    
+                    if (dictionary[propertyName] == [NSNull null]) {
+                        [managedObject setPrimitiveValue:nil forKey:propertyName];
+                    
+                    } else {
+                        NSString* relatedObjectUID = [[dictionary[propertyName]allValues]lastObject];
+                        NSString* relatedEntityName = [[dictionary[propertyName]allKeys]lastObject];
+                        NSEntityDescription* relatedEntity = [NSEntityDescription entityForName:relatedEntityName inManagedObjectContext:context];
+                        NSManagedObjectID* relatedManagedObjectID = [self managedObjectIDForEntity:relatedEntity withObjectUID:relatedObjectUID];
+                        NSManagedObject *relatedManagedObject = [[managedObject managedObjectContext] objectWithID:relatedManagedObjectID];
+                        [managedObject setPrimitiveValue:relatedManagedObject forKey:propertyName];
+                    }
+                }
+            }
         }
-      }
-    }
-    [managedObject didChangeValueForKey:propertyName];
-  }];
+        [managedObject didChangeValueForKey:propertyName];
+    }];
 }
 
 @end
