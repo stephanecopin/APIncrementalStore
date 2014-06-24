@@ -30,6 +30,8 @@
 
 #import "UnitTestingCommon.h"
 
+#define WAIT_PATIENTLY [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]
+
 static NSString* const kAuthorName = @"George R. R. Martin";
 static NSString* const kBookName1 = @"A Game of Thrones";
 static NSString* const kBookName2 = @"A Clash of Kings";
@@ -58,7 +60,7 @@ static NSString* const kBookName2 = @"A Clash of Kings";
     }
     
     [Parse setApplicationId:APParseApplicationID clientKey:APParseClientKey];
-    
+
     self.coreDataController = [[CoreDataController alloc]init];
     
     // All tests will be conducted in background to supress the annoying Parse SDK warnings
@@ -84,8 +86,7 @@ static NSString* const kBookName2 = @"A Clash of Kings";
     // Starting fresh
     DLog(@"Reseting Cache");
     [self.coreDataController requestResetCache];
-    while (self.coreDataController.isResetingTheCache &&
-           [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]);
+    while (self.coreDataController.isResetingTheCache && WAIT_PATIENTLY);
     
     /* Create the objects and its relationships
      
@@ -100,14 +101,14 @@ static NSString* const kBookName2 = @"A Clash of Kings";
         NSError* saveError = nil;
         PFObject* book = [PFObject objectWithClassName:@"Book"];
         book[@"name"] = kBookName1;
-        book[APObjectIsDeletedAttributeName] = @NO;
+        book[APObjectStatusAttributeName] = @(APObjectStatusPopulated);
         book[APObjectEntityNameAttributeName] = @"Book";
         book[APObjectUIDAttributeName] = [self createObjectUID];
         [book save:&saveError];
         
         PFObject* author = [PFObject objectWithClassName:@"Author"];
         author[@"name"] = kAuthorName;
-        author[APObjectIsDeletedAttributeName] = @NO;
+        author[APObjectStatusAttributeName] = @(APObjectStatusPopulated);
         author[APObjectEntityNameAttributeName] = @"Author";
         author[APObjectUIDAttributeName] = [self createObjectUID];
         [author save:&saveError];
@@ -129,8 +130,7 @@ static NSString* const kBookName2 = @"A Clash of Kings";
     
     // Sync and wait untill it's finished
     [self.coreDataController requestSyncCache];
-    while (self.coreDataController.isSyncingTheCache &&
-           [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]);
+    while (self.coreDataController.isSyncingTheCache && WAIT_PATIENTLY);
     DLog(@"Set-up finished");
 }
 
@@ -295,8 +295,8 @@ static NSString* const kBookName2 = @"A Clash of Kings";
         NSError* error;
         PFObject* book2 = [PFObject objectWithClassName:@"Book"];
         book2[@"name"] = kBookName2;
-        book2[APObjectIsDeletedAttributeName] = @NO;
-        book2 [APObjectEntityNameAttributeName] = @"Book";
+        book2[APObjectStatusAttributeName] = @(APObjectStatusPopulated);
+        book2[APObjectEntityNameAttributeName] = @"Book";
         book2[APObjectUIDAttributeName] = [self createObjectUID];
         [book2 save:&error];
         
@@ -358,7 +358,7 @@ static NSString* const kBookName2 = @"A Clash of Kings";
         PFObject* book1 = [PFObject objectWithClassName:@"Book"];
         book1[@"name"] = @"Book#1";
         book1[APObjectEntityNameAttributeName] = @"Book";
-        book1[APObjectIsDeletedAttributeName] = @NO;
+        book1[APObjectStatusAttributeName] = @(APObjectStatusPopulated);
         book1[APObjectUIDAttributeName] = [self createObjectUID];
         [book1 save:&error];
         
@@ -406,16 +406,16 @@ static NSString* const kBookName2 = @"A Clash of Kings";
     
     // Sync and wait untill it's finished
     [self.coreDataController requestSyncCache];
-    while (self.coreDataController.isSyncingTheCache &&
-           [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]);
+    while (self.coreDataController.isSyncingTheCache && WAIT_PATIENTLY);
+    
     
     dispatch_group_async(self.group, self.queue, ^{
         [[[PFQuery queryWithClassName:@"Book"]findObjects]enumerateObjectsUsingBlock:^(PFObject* obj, NSUInteger idx, BOOL *stop) {
-            XCTAssertTrue([[obj valueForKey:APObjectIsDeletedAttributeName] isEqualToNumber:@YES]);
+            XCTAssertTrue([[obj valueForKey:APObjectStatusAttributeName] isEqualToNumber:@(APObjectStatusDeleted)]);
         }];
         
         [[[PFQuery queryWithClassName:@"Author"]findObjects]enumerateObjectsUsingBlock:^(PFObject* obj, NSUInteger idx, BOOL *stop) {
-            XCTAssertTrue([[obj valueForKey:APObjectIsDeletedAttributeName] isEqualToNumber:@YES]);
+            XCTAssertTrue([[obj valueForKey:APObjectStatusAttributeName] isEqualToNumber:@(APObjectStatusDeleted)]);
         }];
     });
     dispatch_group_wait(self.group, DISPATCH_TIME_FOREVER);
@@ -430,45 +430,41 @@ static NSString* const kBookName2 = @"A Clash of Kings";
  
 Expected Results:
  - The existing author should remain with only one book.
- - Be mindful that we don't actually delete the objects, instead we mark it as deleted (APObjectIsDeleted)
+ - Be mindful that we don't actually delete the objects, instead we mark it as deleted (APObjectStatusDeleted)
    in order to allow other users to sync this change corretly afterwards
  */
 - (void) testRemoveObjectFromToManyRelationship {
     
-     MLog();
-    
     // Create the second Book and Sync
-    DLog(@"Creating new book");
     Book* book2 = [NSEntityDescription insertNewObjectForEntityForName:@"Book" inManagedObjectContext:self.coreDataController.mainContext];
     book2.name = kBookName2;
     book2.author = [self fetchAuthor];
     DLog(@"New book created: %@",book2);
     
+    // Save & sync
     NSError* error = nil;
     [self.coreDataController.mainContext save:&error];
     XCTAssertNil(error);
-    
     [self.coreDataController requestSyncCache];
-    while (self.coreDataController.isSyncingTheCache &&
-           [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]])
+    while (self.coreDataController.isSyncingTheCache && WAIT_PATIENTLY);
     
+    // Delete object, Save & Sync
     [self.coreDataController.mainContext deleteObject: book2];
-    
     [self.coreDataController.mainContext save:&error];
     XCTAssertNil(error);
     
     [self.coreDataController requestSyncCache];
-    while (self.coreDataController.isSyncingTheCache && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]);
+    while (self.coreDataController.isSyncingTheCache && WAIT_PATIENTLY);
     
     // Verify that only one books is marked as delete at Parse
     dispatch_group_async(self.group, self.queue, ^{
         [[[PFQuery queryWithClassName:@"Book"]findObjects]enumerateObjectsUsingBlock:^(PFObject* obj, NSUInteger idx, BOOL *stop) {
             
             if ([[obj valueForKeyPath:@"name"] isEqualToString:kBookName1]) {
-                XCTAssertTrue([[obj valueForKey:APObjectIsDeletedAttributeName] isEqualToNumber:@NO]);
+                XCTAssertTrue([[obj valueForKey:APObjectStatusAttributeName] isEqualToNumber:@(APObjectStatusPopulated)]);
                 
             } else if ([[obj valueForKeyPath:@"name"] isEqualToString:kBookName2]) {
-                XCTAssertTrue([[obj valueForKey:APObjectIsDeletedAttributeName] isEqualToNumber:@YES]);
+                XCTAssertTrue([[obj valueForKey:APObjectStatusAttributeName] isEqualToNumber:@(APObjectStatusDeleted)]);
                 
                 PFObject* author = [obj objectForKey:@"author"];
                 XCTAssertTrue([author isEqual:[NSNull null]]);
@@ -480,7 +476,7 @@ Expected Results:
         
         // Verify that the author is not marked as delete at Parse
         [[[PFQuery queryWithClassName:@"Author"]findObjects]enumerateObjectsUsingBlock:^(PFObject* obj, NSUInteger idx, BOOL *stop) {
-            XCTAssertTrue([[obj valueForKey:APObjectIsDeletedAttributeName] isEqualToNumber:@NO]);
+            XCTAssertTrue([[obj valueForKey:APObjectStatusAttributeName] isEqualToNumber:@(APObjectStatusPopulated)]);
         }];
         
     });
@@ -528,8 +524,9 @@ Expected Results:
             for (NSUInteger i = 0; i < skip; i++) {
                 PFObject* author = [PFObject objectWithClassName:@"Author"];
                 [author setValue:[NSString stringWithFormat:@"Author#%lu",(unsigned long) thread * skip + i] forKey:@"name"];
-                [author setValue:@NO forKey:APObjectIsDeletedAttributeName];
+                author[APObjectStatusAttributeName] = @(APObjectStatusPopulated);
                 [author setValue:[self createObjectUID] forKey:APObjectUIDAttributeName];
+                author[APObjectEntityNameAttributeName] = @"Author";
                 [author save:&saveError];
                 DLog(@"Author created: %@",[author valueForKeyPath:@"name"])
                 XCTAssertNil(saveError);
@@ -565,6 +562,121 @@ Expected Results:
     NSUInteger numberOfAuthorsFetched = [self.coreDataController.mainContext countForFetchRequest:fr error:&fetchError];
     XCTAssertNil(fetchError);
     XCTAssertTrue(numberOfAuthorsFetched == numberOfAuthorsCreated);
+}
+
+/*
+ There's a huge bottleneck when syncing a considerable amount of objects with to-many relationships.
+ The reason is that in order to keep consistency at all costs for each object fetched from the webservice (ie. Parse)
+ it is necessary to create and execute another query for every relationship that it contains. That means we are able to
+ fetch in batchs of up to 1000 objects (ie. Parse) but then multiples queries subsequentely are necessary for each object.
+ That's how PFRelation (Parse) works, perhaps another baas provider might have a better solution but for now we need to put up
+ with that. 
+ There's an alternative for PFRelation, wich is the Array, we may read more about the differences at: https://www.parse.com/docs/relations_guide
+ 
+ The intention of this test is to compare the two alternatives in terms of bandwidth, requests and time to finish.
+ See the test testStressTestForToManyRelationshipsUsingParseArray for the counterpart of this test.
+ 
+ ATTENTION: This test is disabled by default as it took a considerable amount of time to be completed, turn it on when necessary
+ */
+- (void) testStressTestForToManyRelationshipsUsingParseRelation {
+
+}
+
+- (void) testStressTestForToManyRelationshipsUsingParseArray {
+    
+    NSUInteger const numberOfMagazinescostsToBeCreated = 100;
+    
+    __block NSUInteger numberOfMagazinesCreated;
+    
+    PFObject* author1 = [PFObject objectWithClassName:@"Author"];
+    [author1 setValue:@"author1" forKey:@"name"];
+    author1[APObjectStatusAttributeName] = @(APObjectStatusPopulated);
+    [author1 setValue:[self createObjectUID] forKey:APObjectUIDAttributeName];
+    author1[APObjectEntityNameAttributeName] = @"Author";
+    
+    PFObject* author2 = [PFObject objectWithClassName:@"Author"];
+    [author2 setValue:@"author2" forKey:@"name"];
+    author2[APObjectStatusAttributeName] = @(APObjectStatusPopulated);
+    [author2 setValue:[self createObjectUID] forKey:APObjectUIDAttributeName];
+    author2[APObjectEntityNameAttributeName] = @"Author";
+    
+    dispatch_group_async(self.group, self.queue, ^{
+        NSError* authorSaveError = nil;
+        [author1 save:&authorSaveError];
+        [author2 save:&authorSaveError];
+    });
+    dispatch_group_wait(self.group, DISPATCH_TIME_FOREVER);
+    
+    PFRelation* magazines1 = [author2 relationForKey:@"magazines"];
+    PFRelation* magazines2 = [author2 relationForKey:@"magazines"];
+    
+    dispatch_group_async(self.group, self.queue, ^{
+        
+        for (NSUInteger i = 0; i < numberOfMagazinescostsToBeCreated; i++) {
+            PFObject* magazine = [PFObject objectWithClassName:@"Magazine"];
+            [magazine setValue:[NSString stringWithFormat:@"Magaznine#%lu",(unsigned long) i] forKey:@"name"];
+            magazine[APObjectStatusAttributeName] = @(APObjectStatusPopulated);
+            [magazine setValue:[self createObjectUID] forKey:APObjectUIDAttributeName];
+            magazine[APObjectEntityNameAttributeName] = @"Magazine";
+            [magazine addObject:author1 forKey:@"authors"];
+            [magazine addObject:author2 forKey:@"authors"];
+            
+            NSError* saveError = nil;
+            [magazine save:&saveError];
+            XCTAssertNil(saveError);
+            DLog(@"Magazine created: %@",[magazine valueForKeyPath:@"name"])
+            
+            [magazines1 addObject:magazine];
+            [magazines2 addObject:magazine];
+        }
+    });
+    dispatch_group_wait(self.group, DISPATCH_TIME_FOREVER);
+    
+    dispatch_group_async(self.group, self.queue, ^{
+        NSError* authorSaveError = nil;
+        [author1 save:&authorSaveError];
+        [author2 save:&authorSaveError];
+    });
+    dispatch_group_wait(self.group, DISPATCH_TIME_FOREVER);
+    
+    __block NSError* countError;
+    dispatch_group_async(self.group, self.queue, ^{
+        PFQuery* query = [PFQuery queryWithClassName:@"Magazine"];
+        numberOfMagazinesCreated = [query countObjects:&countError];
+    });
+    dispatch_group_wait(self.group, DISPATCH_TIME_FOREVER);
+    
+    ALog(@"Start Syncing");
+    NSDate* startSync = [NSDate date];
+    [self.coreDataController requestSyncCache];
+    while (self.coreDataController.isSyncingTheCache &&
+           [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]);
+    
+    ALog(@"Seconds to sync all objects: %f",[[NSDate date]timeIntervalSince1970] - [startSync timeIntervalSince1970]);
+    
+    //Check what has been created on the local core data store
+    
+    NSError* fetchError;
+    NSFetchRequest* frForMagzine = [NSFetchRequest fetchRequestWithEntityName:@"Magazine"];
+    NSUInteger numberOfMagazinesFetched = [self.coreDataController.mainContext countForFetchRequest:frForMagzine error:&fetchError];
+    XCTAssertNil(fetchError);
+    XCTAssertTrue(numberOfMagazinesFetched == numberOfMagazinesCreated);
+    
+    NSFetchRequest* frForAuthor1 = [NSFetchRequest fetchRequestWithEntityName:@"Author"];
+    frForAuthor1.predicate = [NSPredicate predicateWithFormat:@"name == %@",@"author1"];
+    NSArray* authors1 = [self.coreDataController.mainContext executeFetchRequest:frForAuthor1 error:&fetchError];
+    XCTAssertNil(fetchError);
+    XCTAssertTrue([authors1 count] == 1);
+    Author* fetchedAuthor1 = [authors1 lastObject];
+    XCTAssertTrue([fetchedAuthor1.magazines count] == numberOfMagazinesCreated);
+    
+    NSFetchRequest* frForAuthor2 = [NSFetchRequest fetchRequestWithEntityName:@"Author"];
+    frForAuthor2.predicate = [NSPredicate predicateWithFormat:@"name == %@",@"author2"];
+    NSArray* authors2 = [self.coreDataController.mainContext executeFetchRequest:frForAuthor2 error:&fetchError];
+    XCTAssertNil(fetchError);
+    XCTAssertTrue([authors2 count] == 1);
+    Author* fetchedAuthor2 = [authors2 lastObject];
+    XCTAssertTrue([fetchedAuthor2.magazines count] == numberOfMagazinesCreated);
 }
 
 
@@ -636,7 +748,7 @@ Expected Results:
         for (NSUInteger i = 0; i < [sortedNames count]; i++) {
             PFObject* author = [PFObject objectWithClassName:@"Author"];
             [author setValue:sortedNames[i] forKey:@"name"];
-            [author setValue:@NO forKey:APObjectIsDeletedAttributeName];
+            author[APObjectStatusAttributeName] = @(APObjectStatusPopulated);
             [author setValue:[self createObjectUID] forKey:APObjectUIDAttributeName];
             author[APObjectEntityNameAttributeName] = @"Author";
             [author save:&saveError];
@@ -714,7 +826,7 @@ Expected Results:
         newEBook[@"name"] = ebookName;
         newEBook[@"format"] = ebookFormat;
         newEBook[APObjectEntityNameAttributeName] = @"EBook";
-        newEBook[APObjectIsDeletedAttributeName] = @NO;
+        newEBook[APObjectStatusAttributeName] = @(APObjectStatusPopulated);
         newEBook[APObjectUIDAttributeName] = [self createObjectUID];
         [newEBook save:&error];
         
@@ -759,6 +871,69 @@ Expected Results:
 }
 
 
+- (void) testInheritanceRemoteToLocalFeetchingParentEntity {
+    
+    __block NSError* error;
+    NSString* ebookName = @"eBook#1";
+    NSString* ebookFormat = @"PDF";
+    
+    dispatch_group_async(self.group, self.queue, ^{
+        
+        PFObject* newEBook = [PFObject objectWithClassName:@"Book"];
+        newEBook[@"name"] = ebookName;
+        newEBook[@"format"] = ebookFormat;
+        newEBook[APObjectEntityNameAttributeName] = @"EBook";
+        newEBook[APObjectStatusAttributeName] = @(APObjectStatusPopulated);
+        newEBook[APObjectUIDAttributeName] = [self createObjectUID];
+        [newEBook save:&error];
+        
+        PFObject* author = [[PFQuery queryWithClassName:@"Author"]getFirstObject];
+        [[author relationForKey:@"books"] addObject:newEBook];
+        [author save:&error];
+        
+        newEBook[@"author"] = author;
+        [newEBook save:&error];
+        
+    });
+    dispatch_group_wait(self.group, DISPATCH_TIME_FOREVER);
+    
+    [self.coreDataController requestSyncCache];
+    while (self.coreDataController.isSyncingTheCache &&
+           [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]);
+    
+    NSFetchRequest* eBookFr = [NSFetchRequest fetchRequestWithEntityName:@"Book"];
+    eBookFr.predicate = [NSPredicate predicateWithFormat:@"name == %@",ebookName,ebookFormat];
+    NSArray* results = [self.coreDataController.mainContext executeFetchRequest:eBookFr error:&error];
+    XCTAssertNil(error);
+   
+    NSManagedObject* object = [results lastObject];
+    
+    XCTAssertNotNil(object);
+    XCTAssertTrue ([object isKindOfClass:[EBook class]]);
+    
+    EBook* eBook = (EBook*) object;
+    XCTAssertTrue([eBook.name isEqualToString:ebookName]);
+    XCTAssertTrue([eBook.format isEqualToString:ebookFormat]);
+    
+    NSFetchRequest* AuthorFr = [NSFetchRequest fetchRequestWithEntityName:@"Author"];
+    eBookFr.predicate = [NSPredicate predicateWithFormat:@"name == %@",kAuthorName];
+    NSArray* authors = [self.coreDataController.mainContext executeFetchRequest:AuthorFr error:&error];
+    Author* author = [authors lastObject];
+    XCTAssertNil(error);
+    XCTAssertNotNil(author);
+    XCTAssertTrue([author.name isEqualToString:kAuthorName]);
+    [author.books enumerateObjectsUsingBlock:^(id obj, BOOL *stop) {
+        if ([[obj valueForKey:@"name"] isEqualToString:ebookName]) {
+            XCTAssertTrue([obj isKindOfClass:[EBook class]]);
+        } else {
+            XCTAssertTrue([obj isKindOfClass:[Book class]]);
+        }
+    }];
+    
+}
+
+
+
 #pragma mark - Support Methods
 
 - (Book*) fetchBook {
@@ -783,6 +958,7 @@ Expected Results:
     [self removeAllObjectsFromParseQuery:[PFQuery queryWithClassName:@"Author"]];
     [self removeAllObjectsFromParseQuery:[PFQuery queryWithClassName:@"Book"]];
     [self removeAllObjectsFromParseQuery:[PFQuery queryWithClassName:@"Page"]];
+    [self removeAllObjectsFromParseQuery:[PFQuery queryWithClassName:@"Magazine"]];
 }
 
 

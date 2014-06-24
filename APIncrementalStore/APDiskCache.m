@@ -34,7 +34,6 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
 @property (nonatomic, strong) NSString* localStoreFileName;
 @property (nonatomic, assign) BOOL shouldResetCacheFile;
 @property (nonatomic, strong) NSString* (^translateManagedObjectIDToObjectUIDBlock) (NSManagedObjectID*);
-@property (nonatomic, weak) id <APWebServiceConnector> connector;
 
 // Context used for saving in BG
 @property (nonatomic, strong) NSManagedObjectContext* privateContext;
@@ -60,22 +59,20 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
 }
 
 
-- (id)initWithManagedModel: (NSManagedObjectModel*) model
- translateToObjectUIDBlock: (NSString* (^)(NSManagedObjectID*)) translateBlock
-        localStoreFileName: (NSString*) localStoreFileName
-      shouldResetCacheFile: (BOOL) shouldResetCache
-       webServiceConnector: (id <APWebServiceConnector>) connector {
+- (id)initWithManagedModel:(NSManagedObjectModel*) model
+ translateToObjectUIDBlock:(NSString* (^)(NSManagedObjectID*)) translateBlock
+        localStoreFileName:(NSString*) localStoreFileName
+      shouldResetCacheFile:(BOOL) shouldResetCache {
     
     if (AP_DEBUG_METHODS) { MLog()}
     
     self = [super init];
     
     if (self) {
-        if (model && translateBlock && localStoreFileName && connector) {
+        if (model && translateBlock && localStoreFileName) {
             _localStoreFileName = localStoreFileName;
             _translateManagedObjectIDToObjectUIDBlock = translateBlock;
             _shouldResetCacheFile = shouldResetCache;
-            _connector = connector;
             self.model = model;
             
             if (AP_DEBUG_INFO) {DLog(@"Disk cache using local store name: %@",localStoreFileName)}
@@ -90,6 +87,8 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
 
 
 #pragma mark - Getters and Setters
+
+
 
 - (void) setModel:(NSManagedObjectModel *)model {
     
@@ -108,7 +107,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
         /*
          It's necessary to change all properties to be optional due to the possibility of the
          APWebServiceConnector creates a new placeholder managed object for a relationship of a object
-         being synced that doesn't exist localy at the moment. That new placeholder object will 
+         being synced that doesn't exist localy at the moment. That new placeholder object will
          only contain the APObjectUIDAttributeName and will be populated when the APWebServiceConnector
          fetches it equivavalent representation from theWeb Service. If we have any optional property set to NO
          it will not be possible to save it. This situation may happen when APWebServiceConnector say syncs
@@ -143,14 +142,14 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
         [lastModifiedProperty setUserInfo:@{APIncrementalStorePrivateAttributeKey:@YES}];
         [additionalProperties addObject:lastModifiedProperty];
         
-        NSAttributeDescription *deletedProperty = [[NSAttributeDescription alloc] init];
-        [deletedProperty setName:APObjectIsDeletedAttributeName];
-        [deletedProperty setAttributeType:NSBooleanAttributeType];
-        [deletedProperty setIndexed:NO];
-        [deletedProperty setOptional:NO];
-        [deletedProperty setDefaultValue:@NO];
-        [deletedProperty setUserInfo:@{APIncrementalStorePrivateAttributeKey:@YES}];
-        [additionalProperties addObject:deletedProperty];
+        NSAttributeDescription *statusProperty = [[NSAttributeDescription alloc] init];
+        [statusProperty setName:APObjectStatusAttributeName];
+        [statusProperty setAttributeType:NSInteger16AttributeType];
+        [statusProperty setIndexed:NO];
+        [statusProperty setOptional:NO];
+        [statusProperty setDefaultValue:@(APObjectStatusCreated)];
+        [statusProperty setUserInfo:@{APIncrementalStorePrivateAttributeKey:@YES}];
+        [additionalProperties addObject:statusProperty];
         
         NSAttributeDescription *isDirtyProperty = [[NSAttributeDescription alloc] init];
         [isDirtyProperty setName:APObjectIsDirtyAttributeName];
@@ -184,7 +183,8 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
     if (!_syncContext) {
         _syncContext = [[NSManagedObjectContext alloc]initWithConcurrencyType:NSPrivateQueueConcurrencyType];
         _syncContext.parentContext = self.mainContext;
-        _syncContext.retainsRegisteredObjects = YES;
+        _syncContext.undoManager = nil;
+        // _syncContext.retainsRegisteredObjects = YES;
     }
     return _syncContext;
 }
@@ -211,7 +211,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
             
             if (![[NSFileManager defaultManager] removeItemAtURL:storeURL error:&deleteError]){
                 if (AP_DEBUG_ERRORS) { ELog(@"Error deleting cachefile:%@",deleteError)}
-           
+                
             } else {
                 if (AP_DEBUG_INFO) { DLog(@"Cache file deleted")};
             }
@@ -239,124 +239,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
 }
 
 
-#pragma mark - Sync
 
-- (void) syncAllObjects: (BOOL) allObjects
-      onCountingObjects: (void (^)(NSInteger localObjects, NSInteger remoteObjects)) countingBlock
-           onSyncObject: (void (^)(BOOL isRemoteObject)) syncObjectBlock
-           onCompletion: (void (^)(NSDictionary* objectUIDsNestedByEntityName, NSError* syncError)) conpletionBlock {
-    
-    if (AP_DEBUG_METHODS) {MLog()}
-    
-    [[UIApplication sharedApplication] setNetworkActivityIndicatorVisible:YES];
-    
-    [self.syncContext performBlock:^ {
-        
-        __block NSError* error = nil;
-        __block NSMutableDictionary* mutableObjectUIDsNestedByEntityName = [NSMutableDictionary dictionary];
-        
-        void (^failureBlock)(void) = ^{
-            [[UIApplication sharedApplication] setNetworkActivityIndicatorVisible:NO];
-            if (conpletionBlock) conpletionBlock(nil,error);
-        };
-        
-        void (^successBlock)(void) = ^{
-            [[UIApplication sharedApplication] setNetworkActivityIndicatorVisible:NO];
-            if (conpletionBlock) conpletionBlock(mutableObjectUIDsNestedByEntityName,error);
-        };
-        
-        // Count objects to be synced and report it via countingBlock
-        if (countingBlock) {
-            NSUInteger localObjects = [self.connector countLocalObjectsToBeSyncedInContext:self.syncContext error:&error];
-            if (error) {
-                [[NSOperationQueue mainQueue]addOperationWithBlock:failureBlock];
-                return;
-            }
-            
-            NSUInteger remoteObjects = [self.connector countRemoteObjectsToBeSyncedInContext:self.syncContext fullSync:allObjects error:&error];
-            if (error) {
-                [[NSOperationQueue mainQueue]addOperationWithBlock:failureBlock];
-                return;
-            }
-            
-            [[NSOperationQueue mainQueue]addOperationWithBlock:^{ countingBlock(localObjects, remoteObjects); }];
-        }
-        
-        // Local Updates - all objects marked as "dirty" and add entries from temporary to permanent objectsUID
-        BOOL mergeSuccess = [self.connector mergeManagedContext:self.syncContext onSyncObject:^{
-            [[NSOperationQueue mainQueue]addOperationWithBlock:^{if (syncObjectBlock) syncObjectBlock(YES); }];
-        } error:&error];
-        
-        if (!mergeSuccess) {
-            if (AP_DEBUG_ERRORS) { ELog(@"Error syncing local changes: %@",error)}
-            [[NSOperationQueue mainQueue]addOperationWithBlock:failureBlock];
-            return;
-        }
-        
-        // Remote Updates - all objects that have updated date earlier than our last successful sync
-        NSDictionary* mergedFromServer;
-        mergedFromServer = [self.connector mergeRemoteObjectsWithContext:self.syncContext fullSync:allObjects onSyncObject:^{
-            [[NSOperationQueue mainQueue]addOperationWithBlock:^{ if (syncObjectBlock) syncObjectBlock(YES); }];
-        } error:&error];
-        
-        [mutableObjectUIDsNestedByEntityName addEntriesFromDictionary:mergedFromServer];
-        
-        if (error) {
-            if (AP_DEBUG_ERRORS) { ELog(@"Error syncing remote changes: %@",error)}
-            [[NSOperationQueue mainQueue]addOperationWithBlock:failureBlock];
-            return;
-        }
-        
-        // Save all contexts
-        
-        NSError* savingError = nil;
-        if (![self saveSyncContext:&savingError]) {
-            [self.connector syncProcessDidFinish:NO];
-            [[NSOperationQueue mainQueue]addOperationWithBlock:failureBlock];
-            
-        } else {
-            [self.connector syncProcessDidFinish:YES];
-            [[NSOperationQueue mainQueue]addOperationWithBlock:successBlock];
-        }
-        self.syncContext = nil;
-    }];
-}
-
-
-- (BOOL) saveSyncContext:(NSError *__autoreleasing*) error {
-    
-    __block BOOL success = YES;
-    
-    if ([self.syncContext hasChanges]) {
-        
-        if (![self.syncContext save:error]) {
-            if (AP_DEBUG_ERRORS) {ELog(@"Error saving sync context changes: %@",*error)}
-            success = NO;
-            
-        } else {
-            
-            [self.mainContext performBlockAndWait:^{
-                
-                if (![self.mainContext save:error]) {
-                    if (AP_DEBUG_ERRORS) {ELog(@"Error saving main context changes: %@",*error)}
-                    success = NO;
-                    
-                } else {
-                    
-                    [self.privateContext performBlock:^{
-                        
-                        // Save to disk
-                        if (![self.privateContext save:error]) {
-                            if (AP_DEBUG_ERRORS) {ELog(@"Error saving private context changes: %@",*error)}
-                            success = NO;
-                        }
-                    }];
-                }
-            }];
-        }
-    }
-    return success;
-}
 
 
 #pragma mark - Fetching
@@ -371,7 +254,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
     __block NSMutableArray* representations = [[NSMutableArray alloc]initWithCapacity:[cachedManagedObjects count]];
     
     [cachedManagedObjects enumerateObjectsUsingBlock:^(NSManagedObject* cacheObject, NSUInteger idx, BOOL *stop) {
-        [representations addObject:[self representationFromManagedObject:cacheObject forEntity:cacheFetchRequest.entity]];
+        [representations addObject:[self representationFromManagedObject:cacheObject]];
     }];
     return representations;
 }
@@ -387,13 +270,14 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
 }
 
 
-- (NSDictionary*) representationFromManagedObject: (NSManagedObject*) cacheObject
-                                        forEntity: (NSEntityDescription*) entity {
+- (NSDictionary*) representationFromManagedObject: (NSManagedObject*) cacheObject {
+    // forEntity: (NSEntityDescription*) entity {
     
     if (AP_DEBUG_METHODS) { MLog()}
     
     NSMutableDictionary* representation = [[NSMutableDictionary alloc]init];
-    NSDictionary* properties = [entity propertiesByName];
+    representation[APObjectEntityNameAttributeName] = cacheObject.entity.name;
+    NSDictionary* properties = [cacheObject.entity propertiesByName];
     
     [properties enumerateKeysAndObjectsUsingBlock:^(NSString* propertyName, NSPropertyDescription* propertyDescription, BOOL *stop) {
         [cacheObject willAccessValueForKey:propertyName];
@@ -431,9 +315,9 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
                 
                 [relatedObjects enumerateObjectsUsingBlock:^(NSManagedObject* relatedObject, BOOL *stop) {
                     [relatedObject willAccessValueForKey:propertyName];
-                        NSMutableArray* relatedObjectsUID = [[relatedObjectsRepresentation valueForKey:relatedObject.entity.name]mutableCopy] ?: [NSMutableArray arrayWithCapacity:1];
-                        [relatedObjectsUID addObject:[relatedObject valueForKey:APObjectUIDAttributeName]];
-                        [relatedObjectsRepresentation setValue:relatedObjectsUID forKey:relatedObject.entity.name];
+                    NSMutableArray* relatedObjectsUID = [[relatedObjectsRepresentation valueForKey:relatedObject.entity.name]mutableCopy] ?: [NSMutableArray arrayWithCapacity:1];
+                    [relatedObjectsUID addObject:[relatedObject valueForKey:APObjectUIDAttributeName]];
+                    [relatedObjectsRepresentation setValue:relatedObjectsUID forKey:relatedObject.entity.name];
                     [relatedObject didAccessValueForKey:propertyName];
                 }];
                 representation[propertyName] = relatedObjectsRepresentation ?: [NSNull null];
@@ -523,16 +407,16 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
                                                                        options:comparisonPredicate.options];
     }
     
-    // see -[APDiskCache setModel:] for a comprensive explanation
+    // see -[APDiskCache setModel:] for a comprehensive explanation
     NSPredicate* lastModifiedDateIsNil = [NSPredicate predicateWithFormat:@"%K == nil",APObjectLastModifiedAttributeName];
     NSPredicate* isNotCreatedRemotely = [NSPredicate predicateWithFormat:@"%K == NO",APObjectIsCreatedRemotelyAttributeName];
     NSPredicate* wasCreatedLocally = [NSCompoundPredicate andPredicateWithSubpredicates:@[lastModifiedDateIsNil,isNotCreatedRemotely]];
     
     NSPredicate* hasLastModifiedDate = [NSPredicate predicateWithFormat:@"%K != nil",APObjectLastModifiedAttributeName];
     NSPredicate* hasLastModifiedDateOrWasCreatedLocally = [NSCompoundPredicate orPredicateWithSubpredicates:@[hasLastModifiedDate,wasCreatedLocally]];
-    NSPredicate* excludeDeletedObjects = [NSPredicate predicateWithFormat:@"%K != YES",APObjectIsDeletedAttributeName];
+    NSPredicate* onlyPopulatedObjectsObjects = [NSPredicate predicateWithFormat:@"%K == %@",APObjectStatusAttributeName,@(APObjectStatusPopulated)];
     
-    return [NSCompoundPredicate andPredicateWithSubpredicates:@[predicateToReturn,excludeDeletedObjects,hasLastModifiedDateOrWasCreatedLocally]];
+    return [NSCompoundPredicate andPredicateWithSubpredicates:@[predicateToReturn,onlyPopulatedObjectsObjects,hasLastModifiedDateOrWasCreatedLocally]];
 }
 
 
@@ -545,10 +429,11 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
     
     NSFetchRequest *fetchRequest = [[NSFetchRequest alloc] initWithEntityName:entityName];
     
-    // Object matching the objectUID and is not deleted
+    // Object matching the objectUID and is populated
     NSPredicate* objectUIDPredicate = [NSPredicate predicateWithFormat:@"%K == %@", APObjectUIDAttributeName, objectUID];
-    NSPredicate* notDeletedUIDPredicate = [NSPredicate predicateWithFormat:@"%K == NO", APObjectIsDeletedAttributeName];
-    fetchRequest.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:@[objectUIDPredicate,notDeletedUIDPredicate]];
+    NSPredicate* populatedObjectsPredicate = [NSPredicate predicateWithFormat:@"%K == %@",APObjectStatusAttributeName,@(APObjectStatusPopulated)];
+    
+    fetchRequest.predicate = [NSCompoundPredicate andPredicateWithSubpredicates:@[objectUIDPredicate,populatedObjectsPredicate]];
     
     NSError *fetchError = nil;
     NSArray *results = [self.mainContext executeFetchRequest:fetchRequest error:&fetchError];
@@ -558,7 +443,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
         [NSException raise:APIncrementalStoreExceptionInconsistency format:@"It was supposed to fetch only one objects based on the objectUID: %@",objectUID];
         
     } else if ([results count] == 1) {
-        managedObjectRep = [self representationFromManagedObject:[results lastObject] forEntity:fetchRequest.entity];
+        managedObjectRep = [self representationFromManagedObject:[results lastObject]];
     }
     
     return managedObjectRep;
@@ -621,7 +506,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
 #pragma mark - Inserting/Creating/Updating
 
 - (BOOL)inserteObjectRepresentations:(NSArray*) representations
-                          entityName:(NSString*) entityName
+// entityName:(NSString*) entityName
                                error:(NSError *__autoreleasing *)error {
     
     if (AP_DEBUG_METHODS) { MLog()}
@@ -634,7 +519,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
         if (!objectUID) {
             [NSException raise:APIncrementalStoreExceptionInconsistency format:@"Representation must have objectUID set"];
         }
-        
+        NSString* entityName = representation[APObjectEntityNameAttributeName];
         NSManagedObjectID* managedObjectID = [self fetchManagedObjectIDForObjectUID:objectUID entityName:entityName createIfNeeded:NO];
         
         NSManagedObject* managedObject;
@@ -655,11 +540,11 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
         [self populateManagedObject:managedObject withRepresentation:representation];
         [managedObject setValue:@YES forKey:APObjectIsDirtyAttributeName];
         [managedObject setValue:@NO forKey:APObjectIsCreatedRemotelyAttributeName];
-        [managedObject setValue:@NO forKey:APObjectIsDeletedAttributeName];
+        [managedObject setValue:@(APObjectStatusPopulated) forKey:APObjectStatusAttributeName];
     }];
     
     NSError* saveError = nil;
-    if (![self saveMainContext:&saveError]) {
+    if (![self saveAndReset:NO mainContext:&saveError]) {
         success = NO;
         *error = saveError;
     }
@@ -669,7 +554,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
 
 
 - (BOOL)updateObjectRepresentations:(NSArray*) updateObjects
-                         entityName:(NSString*) entityName
+// entityName:(NSString*) entityName
                               error:(NSError *__autoreleasing *) error {
     
     if (AP_DEBUG_METHODS) {MLog()}
@@ -679,6 +564,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
     // Update local context with received representations
     [updateObjects enumerateObjectsUsingBlock:^(NSDictionary* representation, NSUInteger idx, BOOL *stop) {
         NSString* objectUID = [representation valueForKey:APObjectUIDAttributeName];
+        NSString* entityName = representation[APObjectEntityNameAttributeName];
         NSManagedObjectID* managedObjectID = [self fetchManagedObjectIDForObjectUID:objectUID entityName:entityName createIfNeeded:NO];
         NSManagedObject* managedObject = [self.mainContext objectWithID:managedObjectID];
         [self populateManagedObject:managedObject withRepresentation:representation];
@@ -686,7 +572,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
     }];
     
     NSError* saveError = nil;
-    if (![self saveMainContext:&saveError]) {
+    if (![self saveAndReset:NO mainContext:&saveError]) {
         success = NO;
         *error = saveError;
     }
@@ -696,7 +582,7 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
 
 
 - (BOOL)deleteObjectRepresentations:(NSArray*) deleteObjects
-                         entityName:(NSString*) entityName
+//entityName:(NSString*) entityName
                               error:(NSError *__autoreleasing *)error {
     
     if (AP_DEBUG_METHODS) {MLog()}
@@ -706,14 +592,15 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
     // Update local context with received representations
     [deleteObjects enumerateObjectsUsingBlock:^(NSDictionary* representation, NSUInteger idx, BOOL *stop) {
         NSString* objectUID = [representation valueForKey:APObjectUIDAttributeName];
+        NSString* entityName = representation[APObjectEntityNameAttributeName];
         NSManagedObjectID* managedObjectID = [self fetchManagedObjectIDForObjectUID:objectUID entityName:entityName createIfNeeded:NO];
         NSManagedObject* managedObject = [self.mainContext objectWithID:managedObjectID];
-        [managedObject setValue:@YES forKey:APObjectIsDeletedAttributeName];
+        [managedObject setValue:@(APObjectStatusDeleted) forKey:APObjectStatusAttributeName];
         [managedObject setValue:@YES forKey:APObjectIsDirtyAttributeName];
     }];
     
     NSError* saveError = nil;
-    if (![self saveMainContext:&saveError]) {
+    if (![self saveAndReset:NO mainContext:&saveError]) {
         success = NO;
         *error = saveError;
     }
@@ -728,21 +615,18 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
     if (AP_DEBUG_METHODS) {MLog()}
     
     // Enumerate through properties and set internal storage
-    [representation enumerateKeysAndObjectsUsingBlock:^(id propertyName, id propertyValue, BOOL *stop) {
+    [[managedObject.entity propertiesByName] enumerateKeysAndObjectsUsingBlock:^(NSString* propertyName, NSPropertyDescription *propertyDescription, BOOL *stop) {
         [managedObject willChangeValueForKey:propertyName];
-        
-        NSPropertyDescription *propertyDescription = [managedObject.entity propertiesByName][propertyName];
         
         // Attributes
         if ([propertyDescription isKindOfClass:[NSAttributeDescription class]]) {
             if (representation[propertyName] == [NSNull null]) {
                 [managedObject setPrimitiveValue:nil forKey:propertyName];
             } else {
-//                if ([propertyName isEqualToString:APObjectUIDAttributeName]) {
-//                    [managedObject setPrimitiveValue:representation[propertyName] forKey:propertyName];
-//                } else {
+                
+                if (representation[propertyName]) {
                     [managedObject setPrimitiveValue:representation[propertyName] forKey:propertyName];
-             //   }
+                }
             }
             
             // Relationships faulted in
@@ -785,35 +669,67 @@ static NSString* const APIncrementalStorePrivateAttributeKey = @"kAPIncrementalS
 }
 
 
-- (BOOL) saveMainContext: (NSError *__autoreleasing *)error {
+- (BOOL) saveAndReset:(BOOL) reset
+          syncContext:(NSError *__autoreleasing*) error {
+    
+    __block BOOL success = YES;
+    __block NSError* localError = nil;
+    
+    if ([self.syncContext hasChanges]) {
+        
+        [self.syncContext performBlockAndWait:^{
+            
+            if (![self.syncContext save:&localError]) {
+                if (AP_DEBUG_ERRORS) {ELog(@"Error saving sync context changes: %@",*error)}
+                success = NO;
+                if (error) *error = localError;
+                
+            } else {
+                if (reset) [self.syncContext reset];
+                if (![self saveAndReset:reset mainContext:&localError]){
+                    success = NO;
+                    if (error) *error = localError;
+                }
+            }
+        }];
+    }
+    return success;
+}
+
+
+- (BOOL) saveAndReset: (BOOL) reset
+          mainContext: (NSError *__autoreleasing *)error {
     
     if (AP_DEBUG_METHODS) { MLog() }
     
     __block BOOL success = YES;
+    __block NSError* localError = nil;
     
     // Save all contexts
     [self.mainContext performBlockAndWait:^{
         
-        if (![self.mainContext save:error]) {
-            if (AP_DEBUG_ERRORS) { ELog(@"Error saving changes: %@",*error)}
+        if (![self.mainContext save:&localError]) {
+            if (AP_DEBUG_ERRORS) { ELog(@"Error saving changes: %@",localError)}
             success = NO;
+            if (error) *error = localError;
             
         } else {
-            [self.privateContext performBlockAndWait:^{
+            [self.mainContext reset];
+            [self.privateContext performBlock:^{
                 
-                if (![self.privateContext save:error]) {
-                    if (AP_DEBUG_ERRORS) { ELog(@"Error saving changes: %@",*error)}
+                if (![self.privateContext save:&localError]) {
+                    if (AP_DEBUG_ERRORS) { ELog(@"Error saving changes: %@",localError)}
                     success = NO;
-                    
+                    if (error) *error = localError;
                 } else {
-                    if (AP_DEBUG_INFO) { DLog(@"Saved to disk") }
+                    [self.privateContext reset];
                 }
             }];
         }
     }];
-    
     return success;
 }
+
 
 - (void) resetCache {
     

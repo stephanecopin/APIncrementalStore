@@ -19,8 +19,11 @@
 @import Foundation;
 
 extern NSString* const CoreDataControllerNotificationDidSync;
+extern NSString* const CoreDataControllerNotificationDidSyncObject;
 extern NSString* const CoreDataControllerNotificationDidResetTheCache;
 extern NSString* const CoreDataControllerACLAttributeName;
+extern NSString* const CoreDataControllerErrorKey;
+
 
 
 @interface CoreDataController : NSObject
